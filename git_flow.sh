@@ -63,7 +63,7 @@ REPO_DIR=""; MULTI_REPOS=(); CUR_BRANCH=""; DETACHED=false
 BRANCH_NAME=""; SANITIZED=""
 STASH_CREATED=false; STASH_MSG=""; SIM_COMMIT=false; MR_FAILED=false
 HAS_STAGED=false; FORMATTED_MSG=""; PUSH_URL=""; MR_TITLE=""; MR_BODY=""; MR_TOOL=""
-MR_CREATED_VIA_PUSH=false
+MR_CREATED_VIA_PUSH=false; MR_MODE=""
 LOGFILE=""; REPLY_VAL=""; PICKED=""
 MATCHES=(); PRUNE_ARGS=()
 
@@ -1270,7 +1270,7 @@ EOF
 }
 
 read_mr_people() {
-  if $MR_PEOPLE_PROMPTED || $NONINTERACTIVE; then return 0; fi
+  if $MR_PEOPLE_PROMPTED || $NONINTERACTIVE || [[ "$MR_MODE" == "none" ]]; then return 0; fi
   MR_PEOPLE_PROMPTED=true
   if [[ -z "$ASSIGNEE" ]]; then
     if prompt "GitLab Assignee CDS ID (optional, e.g. jfernan1 - Enter to skip)" "$LAST_ASSIGNEE"; then
@@ -1555,7 +1555,10 @@ copy_clipboard() {
 
 open_url_in_browser() {
   local url="$1"
-  if command -v cmd.exe >/dev/null 2>&1; then cmd.exe /c start "" "$url" >/dev/null 2>&1
+  if command -v msedge >/dev/null 2>&1; then msedge "$url" >/dev/null 2>&1 &
+  elif [[ -x "/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe" ]]; then "/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe" "$url" >/dev/null 2>&1 &
+  elif [[ -x "/c/Program Files/Microsoft/Edge/Application/msedge.exe" ]]; then "/c/Program Files/Microsoft/Edge/Application/msedge.exe" "$url" >/dev/null 2>&1 &
+  elif command -v cmd.exe >/dev/null 2>&1; then cmd.exe /c start "" "microsoft-edge:$url" >/dev/null 2>&1
   elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$url" >/dev/null 2>&1
   elif command -v open >/dev/null 2>&1; then open "$url" >/dev/null 2>&1
   else return 1
@@ -1580,8 +1583,13 @@ mr_handoff() {
   if [[ -n "$PUSH_URL" ]]; then
     info "GitLab MR Link: $PUSH_URL"
     if ! $NONINTERACTIVE && ! $DRY_RUN; then
-      if confirm "Open the GitLab MR link in your browser now?" y n; then
-        open_url_in_browser "$PUSH_URL" || warn "Could not launch browser automatically - copy the URL above."
+      if [[ "$MR_MODE" == "gui" ]]; then
+        info "Opening GitLab MR link in Microsoft Edge..."
+        open_url_in_browser "$PUSH_URL" || warn "Could not launch Microsoft Edge automatically - copy the URL above."
+      elif [[ "$MR_MODE" != "none" ]]; then
+        if confirm "Open the GitLab MR link in Microsoft Edge now?" y n; then
+          open_url_in_browser "$PUSH_URL" || warn "Could not launch Microsoft Edge automatically - copy the URL above."
+        fi
       fi
     fi
   fi
@@ -1825,9 +1833,18 @@ interactive_menu() {
     *) die "$EX_USAGE" "Invalid choice '$c'." ;;
   esac
   if $DO_PUSH; then
-    detect_mr_tool
-    local via="${MR_TOOL:-GitLab push options}"
-    if confirm "Also auto-create the MR on GitLab (via $via)?" n n; then DO_MR=true; fi
+    printf '\n%s\n' \
+      "How would you like to raise the Merge Request on GitLab?" \
+      "  [1] GitLab GUI (open MR page in Microsoft Edge so you can review/add notes & click Create)" \
+      "  [2] Auto-create from CLI (create MR automatically during push with Assignee/Reviewer CDS ID)" \
+      "  [3] Push only (skip raising MR for now)"
+    prompt "Enter choice" "1" || true
+    case "$(lower "$REPLY_VAL")" in
+      1|gui|edge|browser) MR_MODE="gui"; DO_MR=false ;;
+      2|cli|auto) MR_MODE="cli"; DO_MR=true ;;
+      3|none|push|skip) MR_MODE="none"; DO_MR=false ;;
+      *) warn "Unrecognised choice; using GitLab GUI (Microsoft Edge)."; MR_MODE="gui"; DO_MR=false ;;
+    esac
   fi
 }
 
@@ -1837,7 +1854,7 @@ reset_interactive_run_state() {
   ASSIGNEE=""; REVIEWER=""; MR_PEOPLE_PROMPTED=false
   REPO_DIR=""; MULTI_REPOS=(); CUR_BRANCH=""; DETACHED=false
   BRANCH_NAME=""; SANITIZED=""; SIM_COMMIT=false
-  HAS_STAGED=false; FORMATTED_MSG=""; PUSH_URL=""; MR_TITLE=""; MR_BODY=""; MR_CREATED_VIA_PUSH=false
+  HAS_STAGED=false; FORMATTED_MSG=""; PUSH_URL=""; MR_TITLE=""; MR_BODY=""; MR_CREATED_VIA_PUSH=false; MR_MODE=""
 }
 
 # ------------------------------------------------------------------ main -----

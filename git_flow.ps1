@@ -92,7 +92,7 @@ $script:RepoDir = ''; $script:MultiRepos = @(); $script:CurBranch = ''; $script:
 $script:BranchName = ''; $script:Sanitized = ''
 $script:StashCreated = $false; $script:StashMsg = ''; $script:SimCommit = $false; $script:MrFailed = $false
 $script:HasStaged = $false; $script:FormattedMsg = ''; $script:PushUrl = ''; $script:MrTitle = ''; $script:MrBody = ''; $script:MrTool = ''
-$script:MrCreatedViaPush = $false
+$script:MrCreatedViaPush = $false; $script:MrMode = ''
 $script:GitExit = 0; $script:LastLog = ''; $script:MenuMode = $false; $script:MrBodyFile = ''
 $script:Self = if ($MyInvocation.MyCommand.Path) { $MyInvocation.MyCommand.Path } else { './git_flow.ps1' }
 $script:TempFiles = New-Object System.Collections.Generic.List[string]
@@ -1223,7 +1223,7 @@ function Get-MrBodyTemplate {
 }
 
 function Read-MrPeople {
-    if ($script:MrPeoplePrompted -or $script:NonInteractive) { return }
+    if ($script:MrPeoplePrompted -or $script:NonInteractive -or $script:MrMode -eq 'none') { return }
     $script:MrPeoplePrompted = $true
     if (-not $script:Assignee) {
         $v = Read-Value 'GitLab Assignee CDS ID (optional, e.g. jfernan1 - Enter to skip)' $script:LastAssignee
@@ -1458,6 +1458,25 @@ function Invoke-Push {
     }
 }
 
+function Open-InEdge([string]$Url) {
+    $edgePaths = @('msedge')
+    if (${env:ProgramFiles(x86)}) { $edgePaths += (Join-Path ${env:ProgramFiles(x86)} 'Microsoft\Edge\Application\msedge.exe') }
+    if ($env:ProgramFiles) { $edgePaths += (Join-Path $env:ProgramFiles 'Microsoft\Edge\Application\msedge.exe') }
+    foreach ($p in $edgePaths) {
+        if ($p -eq 'msedge') {
+            if (Get-Command msedge -ErrorAction SilentlyContinue) {
+                Start-Process 'msedge' -ArgumentList $Url
+                return $true
+            }
+        } elseif (Test-Path -LiteralPath $p) {
+            Start-Process $p -ArgumentList $Url
+            return $true
+        }
+    }
+    try { Start-Process "microsoft-edge:$Url"; return $true } catch { }
+    try { Start-Process $Url; return $true } catch { return $false }
+}
+
 function Show-MrHandoff {
     Step 'MR hand-off'
     Read-MrPeople
@@ -1474,8 +1493,13 @@ function Show-MrHandoff {
     if ($script:PushUrl) {
         Info "GitLab MR Link: $($script:PushUrl)"
         if (-not $script:NonInteractive -and -not $script:DryRun) {
-            if (Confirm-Action 'Open the GitLab MR link in your browser now?' 'y' $false) {
-                try { Start-Process $script:PushUrl } catch { Warn "Could not launch browser automatically - copy the URL above." }
+            if ($script:MrMode -eq 'gui') {
+                Info 'Opening GitLab MR link in Microsoft Edge...'
+                if (-not (Open-InEdge $script:PushUrl)) { Warn 'Could not launch Microsoft Edge automatically - copy the URL above.' }
+            } elseif ($script:MrMode -ne 'none') {
+                if (Confirm-Action 'Open the GitLab MR link in Microsoft Edge now?' 'y' $false) {
+                    if (-not (Open-InEdge $script:PushUrl)) { Warn 'Could not launch Microsoft Edge automatically - copy the URL above.' }
+                }
             }
         }
     }
@@ -1706,9 +1730,18 @@ function Show-Menu {
         default { Die $EX_USAGE "Invalid choice '$c'." }
     }
     if ($script:DoPush) {
-        Find-MrTool
-        $via = if ($script:MrTool) { $script:MrTool } else { 'GitLab push options' }
-        if (Confirm-Action "Also auto-create the MR on GitLab (via $via)?" 'n' $false) { $script:DoMr = $true }
+        Write-Host ''
+        Write-Host 'How would you like to raise the Merge Request on GitLab?'
+        Write-Host '  [1] GitLab GUI (open MR page in Microsoft Edge so you can review/add notes & click Create)'
+        Write-Host '  [2] Auto-create from CLI (create MR automatically during push with Assignee/Reviewer CDS ID)'
+        Write-Host '  [3] Push only (skip raising MR for now)'
+        $mc = Read-Value 'Enter choice' '1'
+        switch ($mc.ToLowerInvariant()) {
+            { $_ -in @('1', 'gui', 'edge', 'browser') } { $script:MrMode = 'gui'; $script:DoMr = $false }
+            { $_ -in @('2', 'cli', 'auto') } { $script:MrMode = 'cli'; $script:DoMr = $true }
+            { $_ -in @('3', 'none', 'push', 'skip') } { $script:MrMode = 'none'; $script:DoMr = $false }
+            default { Warn "Unrecognised choice; using GitLab GUI (Microsoft Edge)."; $script:MrMode = 'gui'; $script:DoMr = $false }
+        }
     }
 }
 
@@ -1721,7 +1754,7 @@ function Reset-InteractiveRunState {
     $script:RepoDir = ''; $script:MultiRepos = @(); $script:CurBranch = ''; $script:Detached = $false
     $script:BranchName = ''; $script:Sanitized = ''; $script:SimCommit = $false
     $script:HasStaged = $false; $script:FormattedMsg = ''; $script:PushUrl = ''
-    $script:MrTitle = ''; $script:MrBody = ''; $script:MrCreatedViaPush = $false
+    $script:MrTitle = ''; $script:MrBody = ''; $script:MrCreatedViaPush = $false; $script:MrMode = ''
 }
 
 # ------------------------------------------------------------------ main -----

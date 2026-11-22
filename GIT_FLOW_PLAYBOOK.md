@@ -345,28 +345,24 @@ Right after committing (or when you pick **`[3] Push existing commits`**):
    - If `origin/develop` is ahead, it runs `git merge-tree --write-tree HEAD origin/develop` in memory (without touching your working files):
      - **If conflicts exist:** Warns `WARNING: The MR will have MERGE CONFLICTS with develop!` and asks `Push anyway even though it has merge conflicts with 'develop'? [y/N]`.
      - **If no conflicts:** Confirms `No conflicts detected with origin/develop` and offers to **automatically update your branch before pushing** (using `git rebase origin/develop` if never pushed yet, or a safe `git merge --no-edit origin/develop` if already pushed — never requiring a force-push!).
-4. **Assignee & Reviewer by CDS ID + Pre-Filled GitLab GUI Link / Auto-MR:**
-   - Before pushing, the script asks for your **GitLab Assignee CDS ID** (e.g. `jfernan1`) and **Reviewer CDS ID(s)** (e.g. `rkumar2` or `rkumar2 asmith3`) — both are optional (press Enter to skip) and remembered across components!
-   - **Option A — Using the GitLab GUI link (Normal Push):**
+4. **Choose How to Raise the MR (GitLab GUI in Microsoft Edge vs. Auto-Create from CLI):**
+   - Right before pushing, the script asks:
+     ```text
+     How would you like to raise the Merge Request on GitLab?
+       [1] GitLab GUI (open MR page in Microsoft Edge so you can review/add notes & click Create)
+       [2] Auto-create from CLI (create MR automatically during push with Assignee/Reviewer CDS ID)
+       [3] Push only (skip raising MR for now)
+     ```
+   - For options `[1]` and `[2]`, it asks for your optional **GitLab Assignee CDS ID** (e.g. `jfernan1`) and **Reviewer CDS ID(s)** (e.g. `rkumar2` or `rkumar2 asmith3`) — both are remembered across components!
+   - **Option `[1]` — GitLab GUI (Opens in Microsoft Edge):**
      - Runs `git push --set-upstream origin <your-branch>`.
-     - Takes the `/merge_requests/new` link GitLab returns and **automatically pre-fills** the target branch (`develop`), the MR title, and checks the **"Delete source branch when merge request is accepted"** checkbox (`force_remove_source_branch=1`) right in the URL!
-     - Copies the MR Description to your clipboard, including GitLab Quick Actions at the bottom:
-       ```markdown
-       /assign @jfernan1
-       /assign_reviewer @rkumar2
-       ```
-     - Offers to open the pre-filled GitLab GUI link in your browser (`[Y/n]`). You just paste (`Ctrl+V`) into the Description box and click **Create merge request** — GitLab automatically strips the `/assign` lines and assigns both the Assignee and Reviewer by their CDS IDs!
-   - **Option B — Auto-Creating the MR Directly During Push (`--mr` or answering `y`):**
-     - Uses **GitLab's built-in push options** directly inside `git push` (no extra tools like `glab` required!), passing title, description, Assignee CDS ID, Reviewer Quick Action, and delete-after-merge:
-       ```bash
-       git push --set-upstream origin PROJ-123-fix-can-parser \
-         -o merge_request.create \
-         -o merge_request.target=develop \
-         -o "merge_request.title=PROJ-123: handle empty frame" \
-         -o "merge_request.description=..." \
-         -o merge_request.assign=jfernan1 \
-         -o merge_request.remove_source_branch
-       ```
+     - Pre-fills the `/merge_requests/new` link with target branch (`develop`), title, and `force_remove_source_branch=1`.
+     - Copies the MR Description (with `/assign @<cdsid>` and `/assign_reviewer @<cdsid>` at the bottom) to your clipboard.
+     - **Automatically opens the GitLab MR link in Microsoft Edge** (falling back to your default browser if Edge is not installed). Just press `Ctrl+V` in the Description box if you want the template/CDS IDs, add any extra notes, and click **Create merge request**!
+   - **Option `[2]` — Auto-Create from CLI (During Push):**
+     - Uses **GitLab's built-in push options** directly inside `git push` (no extra tools like `glab` required!), passing title, description, Assignee CDS ID, Reviewer Quick Action, target branch (`develop`), and delete-after-merge (`-o merge_request.remove_source_branch`), then asks if you want to view the created MR in Microsoft Edge.
+   - **Option `[3]` — Push Only:**
+     - Simply pushes with `git push --set-upstream` without prompting for Assignee/Reviewer or opening a browser.
      - GitLab creates the Merge Request on the server immediately during push. (If `glab` or `gh` CLI is installed, it can also use that; if a local test remote doesn't support push options, it automatically retries a normal `git push --set-upstream`).
 5. **MR Hand-Off (Clipboard + Browser Launch):**
    - Generates a complete **MR Title** and **MR Description** (Summary section, Jira ticket link, `branch -> develop`, commit list with short SHAs, changed files diffstat, test section, and review checklist).
