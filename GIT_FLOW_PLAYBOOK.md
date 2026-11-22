@@ -1,4 +1,4 @@
-# AUTOSAR Git + Jira + GitLab Complete Documentation (`git_flow` v2.3)
+# AUTOSAR Git + Jira + GitLab Complete Documentation (`git_flow` v2.4)
 
 This document covers every detail of the `git_flow` workflow assistant: why it exists, where to put it, how to run it, every screen and prompt in sequence, every safety check and edge case, all command-line flags, environment variables, exit codes, and recovery steps.
 
@@ -345,18 +345,26 @@ Right after committing (or when you pick **`[3] Push existing commits`**):
    - If `origin/develop` is ahead, it runs `git merge-tree --write-tree HEAD origin/develop` in memory (without touching your working files):
      - **If conflicts exist:** Warns `WARNING: The MR will have MERGE CONFLICTS with develop!` and asks `Push anyway even though it has merge conflicts with 'develop'? [y/N]`.
      - **If no conflicts:** Confirms `No conflicts detected with origin/develop` and offers to **automatically update your branch before pushing** (using `git rebase origin/develop` if never pushed yet, or a safe `git merge --no-edit origin/develop` if already pushed — never requiring a force-push!).
-4. **Upstream Push & Automatic GitLab MR Creation (Auto-Delete Source Branch):**
-   - Runs:
-     ```bash
-     git push --set-upstream origin PROJ-123-fix-can-parser
-     ```
-   - **If you answered `y` to `"Also auto-create the MR on GitLab?"` (or passed `--mr`):**
-     - Uses **GitLab's built-in push options** directly inside `git push` (no extra tools like `glab` required!), including `-o merge_request.remove_source_branch` so GitLab automatically deletes the merged feature branch after acceptance:
+4. **Assignee & Reviewer by CDS ID + Pre-Filled GitLab GUI Link / Auto-MR:**
+   - Before pushing, the script asks for your **GitLab Assignee CDS ID** (e.g. `jfernan1`) and **Reviewer CDS ID(s)** (e.g. `rkumar2` or `rkumar2 asmith3`) — both are optional (press Enter to skip) and remembered across components!
+   - **Option A — Using the GitLab GUI link (Normal Push):**
+     - Runs `git push --set-upstream origin <your-branch>`.
+     - Takes the `/merge_requests/new` link GitLab returns and **automatically pre-fills** the target branch (`develop`), the MR title, and checks the **"Delete source branch when merge request is accepted"** checkbox (`force_remove_source_branch=1`) right in the URL!
+     - Copies the MR Description to your clipboard, including GitLab Quick Actions at the bottom:
+       ```markdown
+       /assign @jfernan1
+       /assign_reviewer @rkumar2
+       ```
+     - Offers to open the pre-filled GitLab GUI link in your browser (`[Y/n]`). You just paste (`Ctrl+V`) into the Description box and click **Create merge request** — GitLab automatically strips the `/assign` lines and assigns both the Assignee and Reviewer by their CDS IDs!
+   - **Option B — Auto-Creating the MR Directly During Push (`--mr` or answering `y`):**
+     - Uses **GitLab's built-in push options** directly inside `git push` (no extra tools like `glab` required!), passing title, description, Assignee CDS ID, Reviewer Quick Action, and delete-after-merge:
        ```bash
        git push --set-upstream origin PROJ-123-fix-can-parser \
          -o merge_request.create \
          -o merge_request.target=develop \
          -o "merge_request.title=PROJ-123: handle empty frame" \
+         -o "merge_request.description=..." \
+         -o merge_request.assign=jfernan1 \
          -o merge_request.remove_source_branch
        ```
      - GitLab creates the Merge Request on the server immediately during push. (If `glab` or `gh` CLI is installed, it can also use that; if a local test remote doesn't support push options, it automatically retries a normal `git push --set-upstream`).
@@ -441,6 +449,8 @@ Both `git_flow.ps1` / `git_flow.bat` and `git_flow.sh` accept identical flags (P
 | `--desc "<title>"` | `-d "<title>"` | Required branch title / short description |
 | `--base <branch>` | `-b <branch>` | Target base branch (default: `develop`) |
 | `--remote <name>` | `-r <name>` | Remote name (default: `origin`, or auto-detected if `origin` doesn't exist) |
+| `--assignee <cdsid>` | `-a <cdsid>` | GitLab Assignee CDS ID (e.g. `jfernan1`) |
+| `--reviewer <cdsid>` | | GitLab Reviewer CDS ID(s) (e.g. `rkumar2` or `"rkumar2,asmith3"`) |
 | `--all` | | Automatically stage all modified and untracked files (`git add -A`) when committing |
 | `--stash` | | Automatically stash uncommitted tracked changes before creating a new branch |
 | `--dry-run` | `-n` | Simulate and print every mutating Git command without executing it |
@@ -460,6 +470,8 @@ You can set these optional environment variables in your Windows profile or `~/.
 |---|---|---|
 | `GIT_FLOW_BASE` | `develop` | Default base/target branch for branching, syncing, and MRs |
 | `GIT_FLOW_REMOTE` | `origin` | Default Git remote name |
+| `GIT_FLOW_ASSIGNEE` | *(empty)* | Default GitLab Assignee CDS ID (e.g. your own CDS ID `jfernan1`) |
+| `GIT_FLOW_REVIEWER` | *(empty)* | Default GitLab Reviewer CDS ID(s) |
 | `GIT_FLOW_JIRA_URL` | *(empty)* | Base Jira URL (e.g. `https://jira.company.com`) — turns the Jira ID in MR descriptions into a clickable link |
 | `GIT_FLOW_JIRA_PATTERN` | `[A-Z][A-Z0-9_]*-[0-9]+` | Regex pattern used to validate and extract Jira ticket IDs |
 | `GIT_FLOW_PROTECTED` | *(empty)* | Space-separated extra branch globs to protect from direct commits/pushes (in addition to `main`, `master`, `develop`, `release/*`) |

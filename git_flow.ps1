@@ -34,6 +34,8 @@
     -d, --desc "<text>"           Branch title / short description (required)
     -b, --base <branch>           Base/target branch               (default: develop)
     -r, --remote <name>           Remote name                      (default: origin)
+    -a, --assignee <cdsid>        GitLab Assignee CDS ID (e.g. jfernan1)
+        --reviewer <cdsid(s)>     GitLab Reviewer CDS ID(s) (e.g. rkumar2 or "rkumar2,asmith3")
 
   BEHAVIOUR
     -n, --dry-run     Show every mutating command without running it
@@ -58,7 +60,7 @@
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:VERSION = '2.3.0'
+$script:VERSION = '2.4.0'
 $EX_USAGE = 2; $EX_NOTFOUND = 3; $EX_STATE = 4; $EX_NETWORK = 5
 $EX_PROTECTED = 6; $EX_GIT = 7; $EX_MR = 8; $EX_ABORT = 130
 
@@ -82,6 +84,9 @@ $script:NoFetch = $false; $script:Force = $false; $script:StageAll = $false; $sc
 $script:DoBranch = $false; $script:DoCommit = $false; $script:DoPush = $false; $script:DoMr = $false; $script:DoMrText = $false
 $script:DoSync = $false; $script:DoStatus = $false; $script:DoUndo = $false; $script:DoUpdate = $false
 $script:Component = ''; $script:JiraId = ''; $script:LastJiraId = ''; $script:BranchType = ''; $script:Desc = ''; $script:CommitMsg = ''
+$script:Assignee = if ($env:GIT_FLOW_ASSIGNEE) { $env:GIT_FLOW_ASSIGNEE } else { '' }
+$script:Reviewer = if ($env:GIT_FLOW_REVIEWER) { $env:GIT_FLOW_REVIEWER } else { '' }
+$script:LastAssignee = $script:Assignee; $script:LastReviewer = $script:Reviewer; $script:MrPeoplePrompted = $false
 $script:WorkspaceRoot = (Get-Location).ProviderPath
 $script:RepoDir = ''; $script:MultiRepos = @(); $script:CurBranch = ''; $script:Detached = $false
 $script:BranchName = ''; $script:Sanitized = ''
@@ -204,7 +209,7 @@ function Show-Usage {
 }
 
 function Parse-Args([object[]]$Argv) {
-    $needsValue = @('c', 'component', 'j', 'jira', 't', 'type', 'd', 'desc', 'description', 'b', 'base', 'r', 'remote')
+    $needsValue = @('c', 'component', 'j', 'jira', 't', 'type', 'd', 'desc', 'description', 'b', 'base', 'r', 'remote', 'a', 'assignee', 'reviewer')
     $i = 0
     while ($i -lt $Argv.Count) {
         $tok = [string]$Argv[$i]
@@ -233,6 +238,8 @@ function Parse-Args([object[]]$Argv) {
             { $_ -in @('d', 'desc', 'description') } { $script:Desc = $val }
             { $_ -in @('b', 'base') } { $script:BaseBranch = $val }
             { $_ -in @('r', 'remote') } { $script:Remote = $val; $script:DefaultRemote = $val; $script:RemoteExplicit = $true }
+            { $_ -in @('a', 'assignee') } { $script:Assignee = $val; $script:LastAssignee = $val }
+            'reviewer' { $script:Reviewer = $val; $script:LastReviewer = $val }
             { $_ -in @('m', 'commit') } {
                 $script:DoCommit = $true
                 if ($null -ne $inline) { $script:CommitMsg = $inline }
@@ -1215,6 +1222,24 @@ function Get-MrBodyTemplate {
     return $t
 }
 
+function Read-MrPeople {
+    if ($script:MrPeoplePrompted -or $script:NonInteractive) { return }
+    $script:MrPeoplePrompted = $true
+    if (-not $script:Assignee) {
+        $v = Read-Value 'GitLab Assignee CDS ID (optional, e.g. jfernan1 - Enter to skip)' $script:LastAssignee
+        if ($v) { $script:Assignee = $v; $script:LastAssignee = $v }
+    }
+    if (-not $script:Reviewer) {
+        $v = Read-Value 'GitLab Reviewer CDS ID(s) (optional, e.g. rkumar2 or "rkumar2 asmith3" - Enter to skip)' $script:LastReviewer
+        if ($v) { $script:Reviewer = $v; $script:LastReviewer = $v }
+    }
+}
+
+function Format-GitLabHandles([string]$Raw) {
+    $ids = @($Raw -split '[\s,]+' | ForEach-Object { $_.Trim().TrimStart('@') } | Where-Object { $_ })
+    return @($ids | ForEach-Object { '@' + $_ })
+}
+
 function Build-MrMetadata {
     $remote = $script:Remote; $baseRef = "$remote/$($script:BaseBranch)"
     $gd = Git-Out rev-parse --absolute-git-dir
@@ -1257,7 +1282,19 @@ function Build-MrMetadata {
     }
     $body = Get-MrBodyTemplate
     $body = $body.Replace('{{JIRA}}', $jiraLine).Replace('{{BRANCH}}', $script:CurBranch).Replace('{{BASE}}', $script:BaseBranch)
-    $body = $body.Replace('{{NCOMMITS}}', [string]$n).Replace('{{COMMITS}}', $commits).Replace('{{STAT}}', $stat)
+    $body = $body.Replace('{{NCOMMITS}}', [string]$n).Replace('{{COMMITS}}', $commits).Replace('{{STAT}}', $stat).TrimEnd()
+    $qa = @()
+    if ($script:Assignee) {
+        $ah = @(Format-GitLabHandles $script:Assignee)
+        if ($ah.Count -gt 0) { $qa += ('/assign ' + ($ah -join ' ')) }
+    }
+    if ($script:Reviewer) {
+        $rh = @(Format-GitLabHandles $script:Reviewer)
+        if ($rh.Count -gt 0) { $qa += ('/assign_reviewer ' + ($rh -join ' ')) }
+    }
+    if ($qa.Count -gt 0) {
+        $body = $body + "`n`n" + ($qa -join "`n")
+    }
     $script:MrBody = $body.TrimEnd()
     $script:MrBodyFile = Join-Path $gd 'MR_DESCRIPTION.md'
 }
@@ -1373,6 +1410,7 @@ function Invoke-Push {
         }
     }
 
+    Read-MrPeople
     Build-MrMetadata
     Find-MrTool
     $pushArgs = @('push', '--set-upstream', $remote, $cur)
@@ -1380,9 +1418,14 @@ function Invoke-Push {
     $remoteUrl = Git-Out remote get-url $remote
     if ($script:DoMr -and -not $script:MrTool -and $remoteUrl -notmatch 'github\.com') {
         $useGitLabPushOpts = $true
-        $pushArgs += @('-o', 'merge_request.create', '-o', "merge_request.target=$base", '-o', "merge_request.title=$($script:MrTitle)", '-o', 'merge_request.remove_source_branch')
+        $escapedDesc = ($script:MrBody -replace "`r`n", '\n' -replace "`n", '\n')
+        $pushArgs += @('-o', 'merge_request.create', '-o', "merge_request.target=$base", '-o', "merge_request.title=$($script:MrTitle)", '-o', "merge_request.description=$escapedDesc", '-o', 'merge_request.remove_source_branch')
+        if ($script:Assignee) {
+            $aClean = ($script:Assignee -split '[\s,]+' | ForEach-Object { $_.Trim().TrimStart('@') } | Where-Object { $_ } | Select-Object -First 1)
+            if ($aClean) { $pushArgs += @('-o', "merge_request.assign=$aClean") }
+        }
         if ($script:Draft) { $pushArgs += @('-o', 'merge_request.draft') }
-        Info "Pushing '$cur' to '$remote' (git push --set-upstream $remote $cur) with GitLab auto-MR push options (remove source branch on merge)..."
+        Info "Pushing '$cur' to '$remote' (git push --set-upstream $remote $cur) with GitLab auto-MR push options (title, description, assignee/reviewer, delete after merge)..."
     } else {
         Info "Pushing '$cur' to '$remote' (git push --set-upstream $remote $cur)..."
     }
@@ -1396,10 +1439,20 @@ function Invoke-Push {
         Ok "Pushed $cur -> $remote (upstream tracking set)."
         if ($useGitLabPushOpts) {
             $script:MrCreatedViaPush = $true
-            Ok "GitLab Merge Request requested via push options ($cur -> $base)."
+            Ok "GitLab Merge Request created via push options ($cur -> $base, delete source branch enabled)."
         }
         $m = [regex]::Match($script:LastLog, 'https?://\S*(merge_requests|pull)\S*')
-        if ($m.Success) { $script:PushUrl = $m.Value.Trim() }
+        if ($m.Success) {
+            $url = $m.Value.Trim()
+            # If GitLab returned a GUI creation URL (/merge_requests/new), pre-fill target branch, title & delete-after-merge checkbox!
+            if ($url -match '/merge_requests/new') {
+                $sep = if ($url -match '\?') { '&' } else { '?' }
+                $encBase = [System.Uri]::EscapeDataString($base)
+                $encTitle = [System.Uri]::EscapeDataString($script:MrTitle)
+                $url = "${url}${sep}merge_request%5Btarget_branch%5D=${encBase}&merge_request%5Btitle%5D=${encTitle}&merge_request%5Bforce_remove_source_branch%5D=1"
+            }
+            $script:PushUrl = $url
+        }
     } else {
         Fail-Push
     }
@@ -1407,6 +1460,7 @@ function Invoke-Push {
 
 function Show-MrHandoff {
     Step 'MR hand-off'
+    Read-MrPeople
     Build-MrMetadata
     if (-not $script:DryRun) {
         [System.IO.File]::WriteAllText($script:MrBodyFile, $script:MrBody + "`n", (New-Object System.Text.UTF8Encoding $false))
@@ -1455,6 +1509,14 @@ function New-MergeRequest {
     if ($script:MrTool -eq 'glab') {
         $a = @('mr', 'create', '--source-branch', $script:CurBranch, '--target-branch', $script:BaseBranch,
             '--title', (Convert-NativeArg $script:MrTitle), '--description', (Convert-NativeArg $script:MrBody), '--remove-source-branch', '--yes')
+        if ($script:Assignee) {
+            $aClean = ($script:Assignee -split '[\s,]+' | ForEach-Object { $_.Trim().TrimStart('@') } | Where-Object { $_ } | Select-Object -First 1)
+            if ($aClean) { $a += @('--assignee', $aClean) }
+        }
+        if ($script:Reviewer) {
+            $rList = @($script:Reviewer -split '[\s,]+' | ForEach-Object { $_.Trim().TrimStart('@') } | Where-Object { $_ })
+            if ($rList.Count -gt 0) { $a += @('--reviewer', ($rList -join ',')) }
+        }
     } else {
         $a = @('pr', 'create', '--head', $script:CurBranch, '--base', $script:BaseBranch,
             '--title', (Convert-NativeArg $script:MrTitle), '--body-file', $script:MrBodyFile)
@@ -1655,6 +1717,7 @@ function Reset-InteractiveRunState {
     $script:DoMr = $false; $script:DoMrText = $false; $script:DoSync = $false
     $script:DoUndo = $false; $script:DoUpdate = $false
     $script:Component = ''; $script:JiraId = ''; $script:BranchType = ''; $script:Desc = ''; $script:CommitMsg = ''
+    $script:Assignee = ''; $script:Reviewer = ''; $script:MrPeoplePrompted = $false
     $script:RepoDir = ''; $script:MultiRepos = @(); $script:CurBranch = ''; $script:Detached = $false
     $script:BranchName = ''; $script:Sanitized = ''; $script:SimCommit = $false
     $script:HasStaged = $false; $script:FormattedMsg = ''; $script:PushUrl = ''

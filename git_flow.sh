@@ -31,7 +31,7 @@ fi
 
 set -Eeuo pipefail
 
-readonly VERSION="2.3.0"
+readonly VERSION="2.4.0"
 readonly EX_USAGE=2 EX_NOTFOUND=3 EX_STATE=4 EX_NETWORK=5 EX_PROTECTED=6 EX_GIT=7 EX_MR=8 EX_ABORT=130
 
 # ------------------------------------------------------------ configuration ---
@@ -57,6 +57,8 @@ NO_FETCH=false; FORCE=false; STAGE_ALL=false; AUTO_STASH=false; DRAFT=false
 DO_BRANCH=false; DO_COMMIT=false; DO_PUSH=false; DO_MR=false; DO_MRTEXT=false
 DO_SYNC=false; DO_STATUS=false; DO_UNDO=false; DO_UPDATE=false
 COMPONENT=""; JIRA_ID=""; LAST_JIRA_ID=""; BRANCH_TYPE=""; DESC=""; COMMIT_MSG=""
+ASSIGNEE="${GIT_FLOW_ASSIGNEE:-}"; REVIEWER="${GIT_FLOW_REVIEWER:-}"
+LAST_ASSIGNEE="$ASSIGNEE"; LAST_REVIEWER="$REVIEWER"; MR_PEOPLE_PROMPTED=false
 REPO_DIR=""; MULTI_REPOS=(); CUR_BRANCH=""; DETACHED=false
 BRANCH_NAME=""; SANITIZED=""
 STASH_CREATED=false; STASH_MSG=""; SIM_COMMIT=false; MR_FAILED=false
@@ -219,6 +221,8 @@ INPUTS
   -d, --desc "<text>"           Branch title / short description (required)
   -b, --base <branch>           Base/target branch               (default: $BASE_BRANCH)
   -r, --remote <name>           Remote name                      (default: $REMOTE)
+  -a, --assignee <cdsid>        GitLab Assignee CDS ID (e.g. jfernan1)
+      --reviewer <cdsid(s)>     GitLab Reviewer CDS ID(s) (e.g. rkumar2 or "rkumar2,asmith3")
 
 BEHAVIOUR
   -n, --dry-run     Show every mutating command without running it
@@ -266,6 +270,8 @@ parse_args() {
       -d|--desc)       need_value "$@"; DESC="$2"; shift ;;
       -b|--base)       need_value "$@"; BASE_BRANCH="$2"; shift ;;
       -r|--remote)     need_value "$@"; REMOTE="$2"; DEFAULT_REMOTE="$2"; REMOTE_EXPLICIT=true; shift ;;
+      -a|--assignee)   need_value "$@"; ASSIGNEE="$2"; LAST_ASSIGNEE="$2"; shift ;;
+      --reviewer)      need_value "$@"; REVIEWER="$2"; LAST_REVIEWER="$2"; shift ;;
       -m|--commit)     DO_COMMIT=true
                        if [[ $# -ge 2 && "$2" != -* ]]; then COMMIT_MSG="$2"; shift; fi ;;
       -p|--push)       DO_PUSH=true ;;
@@ -1263,6 +1269,45 @@ ${MR_STAT}
 EOF
 }
 
+read_mr_people() {
+  if $MR_PEOPLE_PROMPTED || $NONINTERACTIVE; then return 0; fi
+  MR_PEOPLE_PROMPTED=true
+  if [[ -z "$ASSIGNEE" ]]; then
+    if prompt "GitLab Assignee CDS ID (optional, e.g. jfernan1 - Enter to skip)" "$LAST_ASSIGNEE"; then
+      if [[ -n "$REPLY_VAL" ]]; then ASSIGNEE="$REPLY_VAL"; LAST_ASSIGNEE="$REPLY_VAL"; fi
+    fi
+  fi
+  if [[ -z "$REVIEWER" ]]; then
+    if prompt "GitLab Reviewer CDS ID(s) (optional, e.g. rkumar2 or 'rkumar2 asmith3' - Enter to skip)" "$LAST_REVIEWER"; then
+      if [[ -n "$REPLY_VAL" ]]; then REVIEWER="$REPLY_VAL"; LAST_REVIEWER="$REPLY_VAL"; fi
+    fi
+  fi
+}
+
+format_gitlab_handles() {
+  local raw="$1" tok out=""
+  for tok in ${raw//,/ }; do
+    tok="${tok#@}"
+    if [[ -n "$tok" ]]; then
+      if [[ -n "$out" ]]; then out="$out @$tok"; else out="@$tok"; fi
+    fi
+  done
+  printf '%s' "$out"
+}
+
+url_encode() {
+  local str="$1" i ch hex out=""
+  local LC_ALL=C
+  for (( i = 0; i < ${#str}; i++ )); do
+    ch="${str:i:1}"
+    case "$ch" in
+      [a-zA-Z0-9.~_-]) out+="$ch" ;;
+      *) printf -v hex '%%%02X' "'$ch"; out+="$hex" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
 build_mr_metadata() {
   local base_ref="$REMOTE/$BASE_BRANCH" human nl last jira subj
   jira="$JIRA_ID"
@@ -1301,6 +1346,20 @@ build_mr_metadata() {
     MR_TITLE="${subj:-${jira:-$CUR_BRANCH}}"
   fi
   MR_BODY=$(mr_body_template)
+  local qa="" ah="" rh=""
+  if [[ -n "$ASSIGNEE" ]]; then
+    ah=$(format_gitlab_handles "$ASSIGNEE")
+    if [[ -n "$ah" ]]; then qa="/assign $ah"; fi
+  fi
+  if [[ -n "$REVIEWER" ]]; then
+    rh=$(format_gitlab_handles "$REVIEWER")
+    if [[ -n "$rh" ]]; then
+      if [[ -n "$qa" ]]; then qa="${qa}"$'\n'"/assign_reviewer $rh"; else qa="/assign_reviewer $rh"; fi
+    fi
+  fi
+  if [[ -n "$qa" ]]; then
+    MR_BODY="${MR_BODY}"$'\n\n'"${qa}"
+  fi
 }
 
 classify_push_failure() {
@@ -1432,6 +1491,7 @@ push_branch() {
     fi
   fi
 
+  read_mr_people
   build_mr_metadata
   detect_mr_tool
   local -a push_cmd=(git push --set-upstream "$REMOTE" "$CUR_BRANCH")
@@ -1439,9 +1499,17 @@ push_branch() {
   remote_url=$(git remote get-url "$REMOTE" 2>/dev/null || true)
   if $DO_MR && [[ -z "$MR_TOOL" && "$remote_url" != *"github.com"* ]]; then
     use_gitlab_opts=true
-    push_cmd+=(-o merge_request.create -o "merge_request.target=$BASE_BRANCH" -o "merge_request.title=$MR_TITLE" -o merge_request.remove_source_branch)
+    local escaped_desc
+    escaped_desc=$(printf '%s' "$MR_BODY" | awk 'BEGIN{ORS=""} {if(NR>1) printf "\\n"; gsub(/\r/,""); print}')
+    push_cmd+=(-o merge_request.create -o "merge_request.target=$BASE_BRANCH" -o "merge_request.title=$MR_TITLE" -o "merge_request.description=$escaped_desc" -o merge_request.remove_source_branch)
+    if [[ -n "$ASSIGNEE" ]]; then
+      local a_clean
+      a_clean=$(printf '%s' "${ASSIGNEE//,/ }" | awk '{print $1}')
+      a_clean="${a_clean#@}"
+      if [[ -n "$a_clean" ]]; then push_cmd+=(-o "merge_request.assign=$a_clean"); fi
+    fi
     if $DRAFT; then push_cmd+=(-o merge_request.draft); fi
-    info "Pushing '$CUR_BRANCH' to '$REMOTE' (git push --set-upstream $REMOTE $CUR_BRANCH) with GitLab auto-MR push options (remove source branch on merge)..."
+    info "Pushing '$CUR_BRANCH' to '$REMOTE' (git push --set-upstream $REMOTE $CUR_BRANCH) with GitLab auto-MR push options (title, description, assignee/reviewer, delete after merge)..."
   else
     info "Pushing '$CUR_BRANCH' to '$REMOTE' (git push --set-upstream $REMOTE $CUR_BRANCH)..."
   fi
@@ -1459,9 +1527,16 @@ push_branch() {
     ok "Pushed ${C_BOLD}$CUR_BRANCH${C_RESET} -> $REMOTE (upstream tracking set)."
     if $use_gitlab_opts; then
       MR_CREATED_VIA_PUSH=true
-      ok "GitLab Merge Request requested via push options ($CUR_BRANCH -> $BASE_BRANCH)."
+      ok "GitLab Merge Request created via push options ($CUR_BRANCH -> $BASE_BRANCH, delete source branch enabled)."
     fi
     PUSH_URL=$(grep -Eo 'https?://[^[:space:]]*(merge_requests|pull)[^[:space:]]*' "$LOGFILE" 2>/dev/null | head -n 1 | tr -d '\r' || true)
+    if [[ "$PUSH_URL" == *"/merge_requests/new"* ]]; then
+      local sep="?" enc_base enc_title
+      if [[ "$PUSH_URL" == *"?"* ]]; then sep="&"; fi
+      enc_base=$(url_encode "$BASE_BRANCH")
+      enc_title=$(url_encode "$MR_TITLE")
+      PUSH_URL="${PUSH_URL}${sep}merge_request%5Btarget_branch%5D=${enc_base}&merge_request%5Btitle%5D=${enc_title}&merge_request%5Bforce_remove_source_branch%5D=1"
+    fi
   else
     classify_push_failure
   fi
@@ -1491,6 +1566,7 @@ mr_handoff() {
   step "MR hand-off"
   local gd
   gd=$(git rev-parse --absolute-git-dir)
+  read_mr_people
   build_mr_metadata
   if ! $DRY_RUN; then
     printf '%s\n' "$MR_BODY" >"$gd/MR_DESCRIPTION.md"
@@ -1533,6 +1609,17 @@ create_mr() {
   local -a cmd
   if [[ "$MR_TOOL" == glab ]]; then
     cmd=(glab mr create --source-branch "$CUR_BRANCH" --target-branch "$BASE_BRANCH" --title "$MR_TITLE" --description "$MR_BODY" --remove-source-branch --yes)
+    if [[ -n "$ASSIGNEE" ]]; then
+      local a_clean
+      a_clean=$(printf '%s' "${ASSIGNEE//,/ }" | awk '{print $1}')
+      a_clean="${a_clean#@}"
+      if [[ -n "$a_clean" ]]; then cmd+=(--assignee "$a_clean"); fi
+    fi
+    if [[ -n "$REVIEWER" ]]; then
+      local r_csv
+      r_csv=$(printf '%s' "${REVIEWER//,/ }" | tr -s ' ' ',' | sed 's/@//g; s/^,//; s/,$//')
+      if [[ -n "$r_csv" ]]; then cmd+=(--reviewer "$r_csv"); fi
+    fi
   else
     cmd=(gh pr create --head "$CUR_BRANCH" --base "$BASE_BRANCH" --title "$MR_TITLE" --body "$MR_BODY")
   fi
@@ -1747,6 +1834,7 @@ interactive_menu() {
 reset_interactive_run_state() {
   DO_BRANCH=false; DO_COMMIT=false; DO_PUSH=false; DO_MR=false; DO_MRTEXT=false; DO_SYNC=false; DO_UNDO=false; DO_UPDATE=false
   COMPONENT=""; JIRA_ID=""; BRANCH_TYPE=""; DESC=""; COMMIT_MSG=""
+  ASSIGNEE=""; REVIEWER=""; MR_PEOPLE_PROMPTED=false
   REPO_DIR=""; MULTI_REPOS=(); CUR_BRANCH=""; DETACHED=false
   BRANCH_NAME=""; SANITIZED=""; SIM_COMMIT=false
   HAS_STAGED=false; FORMATTED_MSG=""; PUSH_URL=""; MR_TITLE=""; MR_BODY=""; MR_CREATED_VIA_PUSH=false
