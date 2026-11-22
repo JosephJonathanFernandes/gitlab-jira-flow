@@ -1,4 +1,4 @@
-# AUTOSAR Git + Jira + GitLab Complete Documentation (`git_flow` v2.4)
+# AUTOSAR Git + Jira + GitLab Complete Documentation (`git_flow` v2.5)
 
 This document covers every detail of the `git_flow` workflow assistant: why it exists, where to put it, how to run it, every screen and prompt in sequence, every safety check and edge case, all command-line flags, environment variables, exit codes, and recovery steps.
 
@@ -374,11 +374,12 @@ Right after committing (or when you pick **`[3] Push existing commits`**):
 
 ---
 
-### Phase 8: Additional Safe Menu Actions (`[4]`, `[6]`, `[7]`)
+### Phase 8: Additional Safe Menu Actions (`[4]`, `[6]`, `[7]`, `[8]`)
 
 - **`[4] Show MR title/description for this branch` (`--mr-text`):** Generates the MR Title and Markdown Description for your current branch, saves it to `.git/MR_DESCRIPTION.md`, and copies it to your clipboard without committing or pushing.
 - **`[6] Undo last unpushed commit` (`--undo-commit`):** Safely undoes your last commit (`git reset --soft HEAD~1`) while **keeping all your code changes intact and staged**. Blocked on protected branches and blocked if the commit was already pushed to GitLab.
 - **`[7] Update current branch with latest develop` (`--update`):** Checks for merge conflicts in memory first. If zero conflicts exist, automatically updates your branch with `origin/develop` (via `git rebase` if unpushed, or safe `git merge --no-edit` if already pushed) and auto-aborts safely if anything unexpected occurs.
+- **`[8] Discard unwanted file changes` (`--discard`):** Displays a numbered list of modified and untracked files (ideal for cleaning up accidental DaVinci / EB Tresos `.arxml` edits). Before discarding your selected files, it **automatically saves a safety backup in `git stash`** (`git stash push --include-untracked -m "git_flow backup before discard ..." -- <files>`) so you can always restore them with `git stash pop` if you change your mind!
 
 ---
 
@@ -439,6 +440,7 @@ Both `git_flow.ps1` / `git_flow.bat` and `git_flow.sh` accept identical flags (P
 | `--mr-text` | | Only print & copy the MR Title and Description to clipboard (no commit or push) |
 | `--undo-commit` | `--undo` | Safely undo the last **unpushed** commit (`git reset --soft HEAD~1`), keeping all file edits intact |
 | `--update` | | Update current work branch with latest `origin/develop` (conflict-checked; rebase if unpushed, merge if pushed) |
+| `--discard` | | Safely discard unwanted modified/untracked files (automatically saves a `git stash` backup first) |
 | `--component <name>` | `-c <name>` | Target component repo name (e.g. `dcm`), relative path (`components/dcm`), or comma-separated list for multi-component branching (`can,dcm`) |
 | `--jira <ID>` | `-j <ID>` | Jira Task ID (e.g. `PROJ-123`) |
 | `--type <type>` | `-t <type>` | Branch prefix type: `none` (default: `PROJ-123-title`), `feature`, `bugfix`, or `hotfix` |

@@ -31,7 +31,7 @@ fi
 
 set -Eeuo pipefail
 
-readonly VERSION="2.4.0"
+readonly VERSION="2.5.0"
 readonly EX_USAGE=2 EX_NOTFOUND=3 EX_STATE=4 EX_NETWORK=5 EX_PROTECTED=6 EX_GIT=7 EX_MR=8 EX_ABORT=130
 
 # ------------------------------------------------------------ configuration ---
@@ -55,7 +55,7 @@ SELF="$0"
 DRY_RUN=false; YES=false; NONINTERACTIVE=false; USE_COLOR=true
 NO_FETCH=false; FORCE=false; STAGE_ALL=false; AUTO_STASH=false; DRAFT=false
 DO_BRANCH=false; DO_COMMIT=false; DO_PUSH=false; DO_MR=false; DO_MRTEXT=false
-DO_SYNC=false; DO_STATUS=false; DO_UNDO=false; DO_UPDATE=false
+DO_SYNC=false; DO_STATUS=false; DO_UNDO=false; DO_UPDATE=false; DO_DISCARD=false
 COMPONENT=""; JIRA_ID=""; LAST_JIRA_ID=""; BRANCH_TYPE=""; DESC=""; COMMIT_MSG=""
 ASSIGNEE="${GIT_FLOW_ASSIGNEE:-}"; REVIEWER="${GIT_FLOW_REVIEWER:-}"
 LAST_ASSIGNEE="$ASSIGNEE"; LAST_REVIEWER="$REVIEWER"; MR_PEOPLE_PROMPTED=false
@@ -213,6 +213,7 @@ ACTIONS
       --mr-text          Only print/copy the MR title + description
       --undo-commit      Safely undo the last UNPUSHED commit (keeps all file changes intact)
       --update           Update current work branch with latest origin/develop (conflict-checked)
+      --discard          Safely discard unwanted file changes (saves a git stash backup first)
 
 INPUTS
   -c, --component <name|path>   Component repo folder (or pick interactively from Main Repo)
@@ -282,6 +283,7 @@ parse_args() {
       --status)        DO_STATUS=true ;;
       --undo|--undo-commit) DO_UNDO=true ;;
       --update)        DO_UPDATE=true ;;
+      --discard)       DO_DISCARD=true ;;
       --draft)         DRAFT=true ;;
       --all)           STAGE_ALL=true ;;
       --stash)         AUTO_STASH=true ;;
@@ -307,18 +309,18 @@ parse_args() {
 MENU_MODE=false
 determine_mode() {
   if $DO_MR; then DO_PUSH=true; fi
-  if ! $DO_BRANCH && ! $DO_COMMIT && ! $DO_PUSH && ! $DO_MRTEXT && ! $DO_SYNC && ! $DO_STATUS && ! $DO_UNDO && ! $DO_UPDATE; then
+  if ! $DO_BRANCH && ! $DO_COMMIT && ! $DO_PUSH && ! $DO_MRTEXT && ! $DO_SYNC && ! $DO_STATUS && ! $DO_UNDO && ! $DO_UPDATE && ! $DO_DISCARD; then
     if [[ -n "$JIRA_ID$DESC$BRANCH_TYPE" ]]; then
       DO_BRANCH=true
     elif $NONINTERACTIVE; then
       die "$EX_USAGE" "No action given and no terminal available for the menu." \
-        "Use one of: --status | --sync | --branch | --commit \"msg\" | --push | --mr-text | --undo-commit | --update" "See: $SELF --help"
+        "Use one of: --status | --sync | --branch | --commit \"msg\" | --push | --mr-text | --undo-commit | --update | --discard" "See: $SELF --help"
     else
       MENU_MODE=true
     fi
   fi
-  if $DO_BRANCH && { $DO_COMMIT || $DO_PUSH || $DO_MRTEXT || $DO_SYNC || $DO_STATUS || $DO_UNDO || $DO_UPDATE; }; then
-    die "$EX_USAGE" "--branch cannot be combined with --commit/--push/--mr/--sync/--status/--undo-commit/--update." \
+  if $DO_BRANCH && { $DO_COMMIT || $DO_PUSH || $DO_MRTEXT || $DO_SYNC || $DO_STATUS || $DO_UNDO || $DO_UPDATE || $DO_DISCARD; }; then
+    die "$EX_USAGE" "--branch cannot be combined with --commit/--push/--mr/--sync/--status/--undo-commit/--update/--discard." \
       "Run it twice: first --branch, then --commit ... --push"
   fi
   if $DO_MRTEXT && { $DO_COMMIT || $DO_PUSH; }; then
@@ -1807,6 +1809,73 @@ do_multi_branch() {
   ok "Created '$target_branch': $created   |   Switched to existing: $existing   |   Failed: $failed"
 }
 
+do_discard_files() {
+  step "Safely Discard Unwanted File Changes (with Stash Backup)"
+  local -a paths=() statuses=() kinds=()
+  local ln st p kind
+  while IFS= read -r ln; do
+    if [[ ${#ln} -lt 4 ]]; then continue; fi
+    st="${ln:0:2}"
+    p="${ln:3}"
+    if [[ "$p" == *" -> "* ]]; then p="${p##* -> }"; fi
+    p="${p#\"}"; p="${p%\"}"
+    if [[ "$st" == "??" ]]; then kind="untracked"; else kind="modified"; fi
+    statuses+=("$st"); paths+=("$p"); kinds+=("$kind")
+  done < <(git -c core.quotepath=off status --porcelain 2>/dev/null || true)
+
+  if [[ ${#paths[@]} -eq 0 ]]; then
+    ok "Working tree is already clean - nothing to discard."
+    return 0
+  fi
+
+  info "Files with uncommitted changes in this component:"
+  local i=0
+  for (( i = 0; i < ${#paths[@]}; i++ )); do
+    printf '  [%d]  %s  %s  (%s)\n' "$((i + 1))" "${statuses[$i]}" "${paths[$i]}" "${kinds[$i]}"
+  done
+
+  if $NONINTERACTIVE; then
+    die "$EX_USAGE" "Cannot pick files to discard in non-interactive mode." \
+      "Run interactively to select which files to discard safely."
+  fi
+
+  local -a chosen=()
+  local sel tok valid
+  printf '\n'
+  while true; do
+    read -r -p "Enter file numbers to discard (e.g. 1 3, 'a' = all, 'q' = cancel): " sel || die "$EX_ABORT" "Input closed - aborting."
+    sel=$(trim "$sel")
+    if [[ -z "$sel" ]]; then continue; fi
+    if [[ "$sel" == [qQ] ]]; then info "Cancelled - no files were touched."; return 0; fi
+    if [[ "$sel" == [aA] ]]; then chosen=("${paths[@]}"); break; fi
+    chosen=(); valid=true
+    for tok in ${sel//,/ }; do
+      if [[ "$tok" =~ ^[0-9]+$ ]] && [[ "$tok" -ge 1 && "$tok" -le "${#paths[@]}" ]]; then
+        chosen+=("${paths[$((tok - 1))]}")
+      else
+        valid=false; break
+      fi
+    done
+    if $valid && [[ ${#chosen[@]} -gt 0 ]]; then break; fi
+    warn "Please enter numbers between 1 and ${#paths[@]} (e.g. 1 2), 'a' for all, or 'q' to cancel."
+  done
+
+  printf '\n'
+  warn "About to discard changes in ${#chosen[@]} file(s):"
+  for p in "${chosen[@]}"; do printf '       %s\n' "$p" >&2; done
+  info "A safety backup will be saved in git stash BEFORE discarding so you can restore anytime."
+  if ! confirm "Discard these ${#chosen[@]} file(s) now?" n n; then
+    info "Cancelled - no files were touched."
+    return 0
+  fi
+
+  local backup_msg="git_flow backup before discard $(date +%Y%m%d-%H%M%S)"
+  run git stash push --include-untracked -m "$backup_msg" -- "${chosen[@]}"
+  ok "Discarded changes in ${#chosen[@]} file(s)."
+  info "Safety backup saved in git stash: \"$backup_msg\""
+  hint "Changed your mind? Restore with: git stash pop   (or inspect: git stash list)"
+}
+
 interactive_menu() {
   step "Choose an action"
   printf '%s\n' \
@@ -1817,6 +1886,7 @@ interactive_menu() {
     "  [5] Sync ALL workspace repos (fetch --all -> checkout $BASE_BRANCH -> pull)" \
     "  [6] Undo last unpushed commit (keeps all your file changes intact)" \
     "  [7] Update current branch with latest $BASE_BRANCH (conflict-checked)" \
+    "  [8] Discard unwanted file changes (saves a safety stash backup first)" \
     "  [q] Quit"
   local c
   read -r -p "Enter choice: " c || die "$EX_ABORT" "Input closed - aborting."
@@ -1829,6 +1899,7 @@ interactive_menu() {
     5) DO_SYNC=true ;;
     6) DO_UNDO=true ;;
     7) DO_UPDATE=true ;;
+    8) DO_DISCARD=true ;;
     q|Q) info "Bye."; exit 0 ;;
     *) die "$EX_USAGE" "Invalid choice '$c'." ;;
   esac
@@ -1849,7 +1920,7 @@ interactive_menu() {
 }
 
 reset_interactive_run_state() {
-  DO_BRANCH=false; DO_COMMIT=false; DO_PUSH=false; DO_MR=false; DO_MRTEXT=false; DO_SYNC=false; DO_UNDO=false; DO_UPDATE=false
+  DO_BRANCH=false; DO_COMMIT=false; DO_PUSH=false; DO_MR=false; DO_MRTEXT=false; DO_SYNC=false; DO_UNDO=false; DO_UPDATE=false; DO_DISCARD=false
   COMPONENT=""; JIRA_ID=""; BRANCH_TYPE=""; DESC=""; COMMIT_MSG=""
   ASSIGNEE=""; REVIEWER=""; MR_PEOPLE_PROMPTED=false
   REPO_DIR=""; MULTI_REPOS=(); CUR_BRANCH=""; DETACHED=false
@@ -1923,6 +1994,8 @@ main() {
           do_undo_commit
         elif $DO_UPDATE; then
           do_update_from_base
+        elif $DO_DISCARD; then
+          do_discard_files
         elif $DO_BRANCH; then
           do_branch
         elif $DO_MRTEXT; then

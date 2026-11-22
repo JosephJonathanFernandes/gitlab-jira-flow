@@ -26,6 +26,7 @@
         --mr-text         Only print/copy the MR title + description
         --undo-commit     Safely undo the last UNPUSHED commit (keeps all file changes intact)
         --update          Update current work branch with latest origin/develop (conflict-checked)
+        --discard         Safely discard unwanted file changes (saves a git stash backup first)
 
   INPUTS
     -c, --component <name|path>   Component repo folder (or pick interactively from Main Repo)
@@ -60,7 +61,7 @@
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:VERSION = '2.4.0'
+$script:VERSION = '2.5.0'
 $EX_USAGE = 2; $EX_NOTFOUND = 3; $EX_STATE = 4; $EX_NETWORK = 5
 $EX_PROTECTED = 6; $EX_GIT = 7; $EX_MR = 8; $EX_ABORT = 130
 
@@ -82,7 +83,7 @@ $script:BranchRegex = '^((feature|bugfix|hotfix)/)?' + $script:JiraPattern + '-.
 $script:DryRun = $false; $script:Yes = $false; $script:NonInteractive = $false; $script:UseColor = $true
 $script:NoFetch = $false; $script:Force = $false; $script:StageAll = $false; $script:AutoStash = $false; $script:Draft = $false
 $script:DoBranch = $false; $script:DoCommit = $false; $script:DoPush = $false; $script:DoMr = $false; $script:DoMrText = $false
-$script:DoSync = $false; $script:DoStatus = $false; $script:DoUndo = $false; $script:DoUpdate = $false
+$script:DoSync = $false; $script:DoStatus = $false; $script:DoUndo = $false; $script:DoUpdate = $false; $script:DoDiscard = $false
 $script:Component = ''; $script:JiraId = ''; $script:LastJiraId = ''; $script:BranchType = ''; $script:Desc = ''; $script:CommitMsg = ''
 $script:Assignee = if ($env:GIT_FLOW_ASSIGNEE) { $env:GIT_FLOW_ASSIGNEE } else { '' }
 $script:Reviewer = if ($env:GIT_FLOW_REVIEWER) { $env:GIT_FLOW_REVIEWER } else { '' }
@@ -253,6 +254,7 @@ function Parse-Args([object[]]$Argv) {
             'status' { $script:DoStatus = $true }
             { $_ -in @('undo', 'undocommit') } { $script:DoUndo = $true }
             'update' { $script:DoUpdate = $true }
+            'discard' { $script:DoDiscard = $true }
             'draft' { $script:Draft = $true }
             'all' { $script:StageAll = $true }
             'stash' { $script:AutoStash = $true }
@@ -273,15 +275,15 @@ function Parse-Args([object[]]$Argv) {
 
 function Determine-Mode {
     if ($script:DoMr) { $script:DoPush = $true }
-    if (-not ($script:DoBranch -or $script:DoCommit -or $script:DoPush -or $script:DoMrText -or $script:DoSync -or $script:DoStatus -or $script:DoUndo -or $script:DoUpdate)) {
+    if (-not ($script:DoBranch -or $script:DoCommit -or $script:DoPush -or $script:DoMrText -or $script:DoSync -or $script:DoStatus -or $script:DoUndo -or $script:DoUpdate -or $script:DoDiscard)) {
         if ($script:JiraId -or $script:Desc -or $script:BranchType) { $script:DoBranch = $true }
         elseif ($script:NonInteractive) {
-            Die $EX_USAGE 'No action given and no terminal available for the menu.' @('Use one of: --status | --sync | --branch | --commit "msg" | --push | --mr-text | --undo-commit | --update', "See: $($script:Self) --help")
+            Die $EX_USAGE 'No action given and no terminal available for the menu.' @('Use one of: --status | --sync | --branch | --commit "msg" | --push | --mr-text | --undo-commit | --update | --discard', "See: $($script:Self) --help")
         }
         else { $script:MenuMode = $true }
     }
-    if ($script:DoBranch -and ($script:DoCommit -or $script:DoPush -or $script:DoMrText -or $script:DoSync -or $script:DoStatus -or $script:DoUndo -or $script:DoUpdate)) {
-        Die $EX_USAGE '--branch cannot be combined with --commit/--push/--mr/--sync/--status/--undo-commit/--update.' @('Run it twice: first --branch, then --commit ... --push')
+    if ($script:DoBranch -and ($script:DoCommit -or $script:DoPush -or $script:DoMrText -or $script:DoSync -or $script:DoStatus -or $script:DoUndo -or $script:DoUpdate -or $script:DoDiscard)) {
+        Die $EX_USAGE '--branch cannot be combined with --commit/--push/--mr/--sync/--status/--undo-commit/--update/--discard.' @('Run it twice: first --branch, then --commit ... --push')
     }
     if ($script:DoMrText -and ($script:DoCommit -or $script:DoPush)) {
         Die $EX_USAGE '--mr-text cannot be combined with --commit/--push/--mr.'
@@ -1707,6 +1709,76 @@ function Invoke-MultiBranch([string]$Root, [string[]]$Repos) {
     Ok "Created '$targetBranch': $created   |   Switched to existing: $existing   |   Failed: $failed"
 }
 
+function Invoke-DiscardFiles {
+    Step 'Safely Discard Unwanted File Changes (with Stash Backup)'
+    $raw = Git-Out -c core.quotepath=off status --porcelain
+    $lines = @($raw -split "`n" | Where-Object { $_.Trim() })
+    if ($lines.Count -eq 0) {
+        Ok 'Working tree is already clean - nothing to discard.'
+        return
+    }
+    $items = @()
+    foreach ($ln in $lines) {
+        if ($ln.Length -lt 4) { continue }
+        $st = $ln.Substring(0, 2)
+        $path = $ln.Substring(3).Trim()
+        if ($path -match ' -> (.+)$') { $path = $Matches[1] }
+        $path = $path.Trim('"')
+        $kind = if ($st -eq '??') { 'untracked' } else { 'modified' }
+        $items += [PSCustomObject]@{ Status = $st; Path = $path; Kind = $kind }
+    }
+    if ($items.Count -eq 0) { Ok 'Working tree is clean - nothing to discard.'; return }
+
+    Info 'Files with uncommitted changes in this component:'
+    for ($i = 0; $i -lt $items.Count; $i++) {
+        $it = $items[$i]
+        Write-Host ("  [{0}]  {1}  {2}  ({3})" -f ($i + 1), $it.Status, $it.Path, $it.Kind)
+    }
+
+    $chosen = @()
+    if ($script:NonInteractive) {
+        Die $EX_USAGE 'Cannot pick files to discard in non-interactive mode.' @('Run interactively to select which files to discard safely.')
+    }
+    Write-Host ''
+    while ($true) {
+        $sel = Read-Host "Enter file numbers to discard (e.g. 1 3, 'a' = all, 'q' = cancel)"
+        if ([string]::IsNullOrWhiteSpace($sel)) { continue }
+        $sel = $sel.Trim()
+        if ($sel -match '^[qQ]$') { Info 'Cancelled - no files were touched.'; return }
+        if ($sel -match '^[aA]$') { $chosen = @($items | ForEach-Object { $_.Path }); break }
+        $tokens = @($sel -split '[\s,]+' | Where-Object { $_ })
+        $tmpList = New-Object System.Collections.Generic.List[string]
+        $valid = $true
+        foreach ($t in $tokens) {
+            $n = 0
+            if ([int]::TryParse($t, [ref]$n) -and $n -ge 1 -and $n -le $items.Count) {
+                $p = $items[$n - 1].Path
+                if (-not $tmpList.Contains($p)) { $tmpList.Add($p) }
+            } else {
+                $valid = $false; break
+            }
+        }
+        if ($valid -and $tmpList.Count -gt 0) { $chosen = @($tmpList.ToArray()); break }
+        Warn "Please enter numbers between 1 and $($items.Count) (e.g. 1 2), 'a' for all, or 'q' to cancel."
+    }
+
+    Write-Host ''
+    Warn "About to discard changes in $($chosen.Count) file(s):"
+    foreach ($p in $chosen) { Write-Host "       $p" }
+    Info 'A safety backup will be saved in git stash BEFORE discarding so you can restore anytime.'
+    if (-not (Confirm-Action "Discard these $($chosen.Count) file(s) now?" 'n' $false)) {
+        Info 'Cancelled - no files were touched.'
+        return
+    }
+
+    $backupMsg = "git_flow backup before discard $(Get-Date -Format 'yyyyMMdd-HHmmss')"
+    $stashArgs = @('stash', 'push', '--include-untracked', '-m', $backupMsg, '--') + $chosen
+    Run-Git $stashArgs
+    Ok "Discarded changes in $($chosen.Count) file(s)."
+    Info "Safety backup saved in git stash: `"$backupMsg`""
+    Hint 'Changed your mind? Restore with: git stash pop   (or inspect: git stash list)'
+}
+
 function Show-Menu {
     Step 'Choose an action'
     Write-Host "  [1] Start New Branch (fetch --all -> checkout & pull $($script:BaseBranch) -> create Jira branch)"
@@ -1716,6 +1788,7 @@ function Show-Menu {
     Write-Host "  [5] Sync ALL workspace repos (fetch --all -> checkout $($script:BaseBranch) -> pull)"
     Write-Host '  [6] Undo last unpushed commit (keeps all your file changes intact)'
     Write-Host "  [7] Update current branch with latest $($script:BaseBranch) (conflict-checked)"
+    Write-Host '  [8] Discard unwanted file changes (saves a safety stash backup first)'
     Write-Host '  [q] Quit'
     $c = Read-Host 'Enter choice'
     switch ($c) {
@@ -1726,6 +1799,7 @@ function Show-Menu {
         '5' { $script:DoSync = $true }
         '6' { $script:DoUndo = $true }
         '7' { $script:DoUpdate = $true }
+        '8' { $script:DoDiscard = $true }
         { $_ -in @('q', 'Q') } { Info 'Bye.'; throw 'GITFLOW_QUIT' }
         default { Die $EX_USAGE "Invalid choice '$c'." }
     }
@@ -1748,7 +1822,7 @@ function Show-Menu {
 function Reset-InteractiveRunState {
     $script:DoBranch = $false; $script:DoCommit = $false; $script:DoPush = $false
     $script:DoMr = $false; $script:DoMrText = $false; $script:DoSync = $false
-    $script:DoUndo = $false; $script:DoUpdate = $false
+    $script:DoUndo = $false; $script:DoUpdate = $false; $script:DoDiscard = $false
     $script:Component = ''; $script:JiraId = ''; $script:BranchType = ''; $script:Desc = ''; $script:CommitMsg = ''
     $script:Assignee = ''; $script:Reviewer = ''; $script:MrPeoplePrompted = $false
     $script:RepoDir = ''; $script:MultiRepos = @(); $script:CurBranch = ''; $script:Detached = $false
@@ -1815,6 +1889,7 @@ function Invoke-Main([object[]]$Argv) {
                 }
                 elseif ($script:DoUndo) { Invoke-UndoCommit }
                 elseif ($script:DoUpdate) { Invoke-UpdateFromBase }
+                elseif ($script:DoDiscard) { Invoke-DiscardFiles }
                 elseif ($script:DoBranch) { Invoke-Branch }
                 elseif ($script:DoMrText) { Invoke-MrText }
                 else { Invoke-CommitPush }
