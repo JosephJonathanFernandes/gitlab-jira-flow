@@ -24,6 +24,7 @@ This document covers every detail of the `git_flow` workflow assistant: why it e
 7. [Environment Variables (Team Customization)](#7-environment-variables-team-customization)
 8. [Exit Codes Reference](#8-exit-codes-reference)
 9. [Troubleshooting & Recovery Cheat-Sheet](#9-troubleshooting--recovery-cheat-sheet)
+10. [Safe Rollout & First-Time Verification Checklist (Company Codebase)](#10-safe-rollout--first-time-verification-checklist-company-codebase)
 
 ---
 
@@ -543,3 +544,51 @@ git stash pop           # re-apply them to your current working tree
   git push --set-upstream origin PROJ-456-correct-branch-title
   git push origin --delete <old-branch-name>
   ```
+
+---
+
+## 10. Safe Rollout & First-Time Verification Checklist (Company Codebase)
+
+Before sharing `git_flow` with your whole team, run this **2-minute zero-risk checklist** on your company's actual AUTOSAR codebase and GitLab server.
+
+### Why It Is Safe to Test on Production Workspaces
+- **Standard Git only:** Under the hood it only runs normal `git` commands (`fetch --all`, `checkout`, `pull --ff-only`, `add`, `commit`, `push --set-upstream`, `stash`).
+- **Zero destructive commands:** It **never** runs `git push --force`, **never** runs `git reset --hard`, **never** deletes branches, and **never** discards files without saving a `git stash` backup first.
+- **Built-in Dry-Run (`--dry-run`):** Preview every exact `git` command it would run without modifying a single file.
+
+### Step 0: Keep `git_flow` Files Out of `git status`
+When you copy `git_flow.bat`, `git_flow.ps1`, `git_flow.sh`, and `GIT_FLOW_PLAYBOOK.md` into your company's Main Repo root, add these 4 lines to your Main Repo's local `.git/info/exclude` file (so they never show as untracked files and you don't have to edit the company's `.gitignore`):
+
+```text
+git_flow.bat
+git_flow.ps1
+git_flow.sh
+GIT_FLOW_PLAYBOOK.md
+```
+
+### Step 1: 2-Minute Zero-Risk Verification Plan
+1. **Read-Only Check #1 — Component Discovery (`--status`):**
+   ```powershell
+   .\git_flow.bat --status
+   ```
+   *Changes nothing.* Confirm that your Main Repo and all nested AUTOSAR component repos appear in the list with the right branch names, `DETACHED` states, and modified files.
+
+2. **Read-Only Check #2 — Dry-Run Branch Creation (`--dry-run`):**
+   ```powershell
+   .\git_flow.bat -c <one-component-name> --branch -j PROJ-123 -d "test check" --dry-run
+   ```
+   *Changes nothing.* Confirm that `git fetch --all` succeeds on your company VPN/GitLab, `.repo` is fetched (if present), and `origin/develop` is found.
+
+3. **One Real Throwaway Test:**
+   Run `.\git_flow.bat` normally on one small component, create a throwaway test branch, make a tiny comment edit, push it, and verify:
+   - Your company's GitLab server accepts the commit message format (`PROJ-123: description`).
+   - Option `[1] GitLab GUI` opens the pre-filled MR link in **Microsoft Edge** cleanly.
+   - Option `[2] Auto-create from CLI` creates the MR via push options (or falls back cleanly to normal push + Edge link if your GitLab server has push options disabled).
+   *(Delete the throwaway test branch afterward.)*
+
+### 4 Company-Specific Things to Watch For During Your First Test
+1. **Exact `.repo` folder name/path:** The script automatically checks `.repo` and `.repo/manifests` at the workspace root. If your company uses a different folder name (e.g. `.repos`), adjust `Invoke-DotRepoFetch` in `git_flow.ps1` and `fetch_dotrepo` in `git_flow.sh`.
+2. **Custom GitLab commit-message hook:** If your GitLab server rejects `PROJ-123: description` because it expects a different separator (like `[PROJ-123] description` or `PROJ-123 description`), update the single `$script:FormattedMsg` / `FORMATTED_MSG` line in `Format-CommitMessage` / `format_commit_message`.
+3. **GitLab Push Options:** Some self-hosted GitLab instances disable `-o merge_request.create`. If disabled, the script automatically retries a normal `git push --set-upstream` and opens the GitLab GUI link in Microsoft Edge.
+4. **Corporate Windows PowerShell Policy:** If IT policies block PowerShell scripts even via `git_flow.bat`, use `./git_flow.sh` in **Git Bash** — it has 100% identical features.
+
