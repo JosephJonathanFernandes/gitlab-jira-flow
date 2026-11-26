@@ -31,7 +31,7 @@ fi
 
 set -Eeuo pipefail
 
-readonly VERSION="2.7.0"
+readonly VERSION="2.8.0"
 readonly EX_USAGE=2 EX_NOTFOUND=3 EX_STATE=4 EX_NETWORK=5 EX_PROTECTED=6 EX_GIT=7 EX_MR=8 EX_ABORT=130
 
 # ------------------------------------------------------------ configuration ---
@@ -53,7 +53,7 @@ ORIG_DIR="$PWD"
 WORKSPACE_ROOT="$PWD"
 SELF="$0"
 DRY_RUN=false; YES=false; NONINTERACTIVE=false; USE_COLOR=true
-NO_FETCH=false; FORCE=false; STAGE_ALL=false; AUTO_STASH=false; CARRY_CHANGES=false; CARRY_FLAG=false; DRAFT=false
+NO_FETCH=false; FORCE=false; STAGE_ALL=false; AUTO_STASH=false; CARRY_CHANGES=false; CARRY_FLAG=false; JIRA_FROM_BRANCH=false; DRAFT=false
 DO_BRANCH=false; DO_COMMIT=false; DO_PUSH=false; DO_MR=false; DO_MRTEXT=false
 DO_SYNC=false; DO_STATUS=false; DO_UNDO=false; DO_UPDATE=false; DO_DISCARD=false
 COMPONENT=""; JIRA_ID=""; LAST_JIRA_ID=""; BRANCH_TYPE=""; DESC=""; COMMIT_MSG=""
@@ -217,7 +217,8 @@ ACTIONS
 
 INPUTS
   -c, --component <name|path>   Component repo folder (or pick interactively from Main Repo)
-  -j, --jira <ID>               Jira task ID, e.g. PROJ-123
+  -j, --jira <ID>               Jira task ID, e.g. OSKDC33837-14809
+      --jira-from-branch        Auto-extract Jira ID from current branch name (or changed files)
   -t, --type <type>             none | feature | bugfix | hotfix (default: none -> PROJ-123-title)
   -d, --desc "<text>"           Branch title / short description (required)
   -b, --base <branch>           Base/target branch               (default: $BASE_BRANCH)
@@ -288,6 +289,7 @@ parse_args() {
       --draft)         DRAFT=true ;;
       --all)           STAGE_ALL=true ;;
       --carry)         CARRY_FLAG=true ;;
+      --jira-from-branch) JIRA_FROM_BRANCH=true ;;
       --stash)         AUTO_STASH=true ;;
       --no-fetch)      NO_FETCH=true ;;
       --force)         FORCE=true ;;
@@ -900,21 +902,50 @@ sanitize_desc() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-50 | sed -E 's/-+$//'
 }
 
+DETECTED_JIRA=""; DETECTED_JIRA_SRC=""
+detect_jira_id() {
+  DETECTED_JIRA=""; DETECTED_JIRA_SRC=""
+  local found=""
+  if [[ -n "$CUR_BRANCH" ]]; then
+    found=$(printf '%s' "$CUR_BRANCH" | grep -oE "$JIRA_PATTERN" | head -n 1 || true)
+    if [[ -n "$found" ]]; then DETECTED_JIRA="$found"; DETECTED_JIRA_SRC="current branch '$CUR_BRANCH'"; return 0; fi
+  fi
+  found=$(git -c core.quotepath=off status --porcelain 2>/dev/null | grep -oE "$JIRA_PATTERN" | head -n 1 || true)
+  if [[ -n "$found" ]]; then DETECTED_JIRA="$found"; DETECTED_JIRA_SRC="changed file name"; return 0; fi
+  found=$( { git diff --cached -U0 2>/dev/null || true; git diff -U0 2>/dev/null || true; } | grep -E '^\+[^+]' | head -n 500 | grep -oE "$JIRA_PATTERN" | head -n 1 || true)
+  if [[ -n "$found" ]]; then DETECTED_JIRA="$found"; DETECTED_JIRA_SRC="changed file contents"; return 0; fi
+  return 1
+}
+
 collect_branch_inputs() {
+  if [[ -z "$JIRA_ID" ]]; then
+    if detect_jira_id; then
+      if $JIRA_FROM_BRANCH; then
+        JIRA_ID="$DETECTED_JIRA"
+        info "Auto-detected Jira ID '$JIRA_ID' from $DETECTED_JIRA_SRC (--jira-from-branch)."
+      elif ! $NONINTERACTIVE; then
+        info "Auto-detected Jira ID '$DETECTED_JIRA' from $DETECTED_JIRA_SRC (press Enter to use it)."
+        LAST_JIRA_ID="$DETECTED_JIRA"
+      fi
+    elif $JIRA_FROM_BRANCH; then
+      die "$EX_USAGE" "Could not extract a Jira ID from current branch or changed files." "Pass --jira OSKDC33837-14809 explicitly"
+    fi
+  fi
+
   local tries=0
   while true; do
     if [[ -z "$JIRA_ID" ]]; then
-      if ! prompt "Jira Task ID (e.g. PROJ-123)" "$LAST_JIRA_ID"; then
-        die "$EX_USAGE" "Missing Jira ID." "Pass --jira PROJ-123"
+      if ! prompt "Jira Task ID (e.g. OSKDC33837-14809)" "$LAST_JIRA_ID"; then
+        die "$EX_USAGE" "Missing Jira ID." "Pass --jira OSKDC33837-14809 or --jira-from-branch"
       fi
       JIRA_ID="$REPLY_VAL"
     fi
     JIRA_ID=$(upper "$(trim "$JIRA_ID")")
     if [[ "$JIRA_ID" =~ $JIRA_REGEX ]]; then LAST_JIRA_ID="$JIRA_ID"; break; fi
     if $NONINTERACTIVE; then
-      die "$EX_USAGE" "Invalid Jira ID '$JIRA_ID'." "Expected a key like PROJ-123 (LETTERS-NUMBER)"
+      die "$EX_USAGE" "Invalid Jira ID '$JIRA_ID'." "Expected a key like OSKDC33837-14809 (LETTERS-NUMBER)"
     fi
-    warn "Invalid Jira ID '$JIRA_ID' - expected something like PROJ-123."
+    warn "Invalid Jira ID '$JIRA_ID' - expected something like OSKDC33837-14809."
     JIRA_ID=""; tries=$((tries + 1))
     if [[ $tries -ge 3 ]]; then die "$EX_USAGE" "Too many invalid Jira IDs."; fi
   done

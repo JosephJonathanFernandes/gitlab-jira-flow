@@ -30,7 +30,8 @@
 
   INPUTS
     -c, --component <name|path>   Component repo folder (or pick interactively from Main Repo)
-    -j, --jira <ID>               Jira task ID, e.g. PROJ-123
+    -j, --jira <ID>               Jira task ID, e.g. OSKDC33837-14809
+        --jira-from-branch        Auto-extract Jira ID from current branch name (or changed files)
     -t, --type <type>             none | feature | bugfix | hotfix (default: none -> PROJ-123-title)
     -d, --desc "<text>"           Branch title / short description (required)
     -b, --base <branch>           Base/target branch               (default: develop)
@@ -62,7 +63,7 @@
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:VERSION = '2.7.0'
+$script:VERSION = '2.8.0'
 $EX_USAGE = 2; $EX_NOTFOUND = 3; $EX_STATE = 4; $EX_NETWORK = 5
 $EX_PROTECTED = 6; $EX_GIT = 7; $EX_MR = 8; $EX_ABORT = 130
 
@@ -82,7 +83,7 @@ $script:BranchRegex = '^((feature|bugfix|hotfix)/)?' + $script:JiraPattern + '-.
 
 # ------------------------------------------------------------------- state ----
 $script:DryRun = $false; $script:Yes = $false; $script:NonInteractive = $false; $script:UseColor = $true
-$script:NoFetch = $false; $script:Force = $false; $script:StageAll = $false; $script:AutoStash = $false; $script:CarryChanges = $false; $script:CarryFlag = $false; $script:Draft = $false
+$script:NoFetch = $false; $script:Force = $false; $script:StageAll = $false; $script:AutoStash = $false; $script:CarryChanges = $false; $script:CarryFlag = $false; $script:JiraFromBranch = $false; $script:Draft = $false
 $script:DoBranch = $false; $script:DoCommit = $false; $script:DoPush = $false; $script:DoMr = $false; $script:DoMrText = $false
 $script:DoSync = $false; $script:DoStatus = $false; $script:DoUndo = $false; $script:DoUpdate = $false; $script:DoDiscard = $false
 $script:Component = ''; $script:JiraId = ''; $script:LastJiraId = ''; $script:BranchType = ''; $script:Desc = ''; $script:CommitMsg = ''
@@ -259,6 +260,7 @@ function Parse-Args([object[]]$Argv) {
             'draft' { $script:Draft = $true }
             'all' { $script:StageAll = $true }
             'carry' { $script:CarryFlag = $true }
+            'jirafrombranch' { $script:JiraFromBranch = $true }
             'stash' { $script:AutoStash = $true }
             'nofetch' { $script:NoFetch = $true }
             'force' { $script:Force = $true }
@@ -889,18 +891,58 @@ function ConvertTo-BranchDesc([string]$d) {
     return $s
 }
 
+function Detect-JiraId {
+    # 1) Current branch name (e.g. feature/OSKDC33837-14809-ucl-10-02)
+    if ($script:CurBranch) {
+        $m = [regex]::Match($script:CurBranch, $script:JiraPattern)
+        if ($m.Success) { return @{ Id = $m.Value; Source = "current branch '$($script:CurBranch)'" } }
+    }
+    # 2) Changed / untracked filenames
+    $files = Git-Out -c core.quotepath=off status --porcelain
+    if ($files) {
+        $m = [regex]::Match($files, $script:JiraPattern)
+        if ($m.Success) { return @{ Id = $m.Value; Source = 'changed file name' } }
+    }
+    # 3) Added/modified lines in staged or unstaged diff (capped at 500 lines for speed on large .sbsx models)
+    foreach ($diffArgs in @(@('diff', '--cached', '-U0'), @('diff', '-U0'))) {
+        $d = Git-Out @diffArgs
+        if (-not $d) { continue }
+        $added = @($d -split "`n" | Where-Object { $_.StartsWith('+') -and -not $_.StartsWith('+++') } | Select-Object -First 500)
+        foreach ($ln in $added) {
+            $m = [regex]::Match($ln, $script:JiraPattern)
+            if ($m.Success) { return @{ Id = $m.Value; Source = 'changed file contents' } }
+        }
+    }
+    return $null
+}
+
 function Read-BranchInputs {
+    if (-not $script:JiraId) {
+        $detected = Detect-JiraId
+        if ($script:JiraFromBranch) {
+            if ($detected) {
+                $script:JiraId = $detected.Id
+                Info "Auto-detected Jira ID '$($script:JiraId)' from $($detected.Source) (--jira-from-branch)."
+            } else {
+                Die $EX_USAGE 'Could not extract a Jira ID from current branch or changed files.' @('Pass --jira OSKDC33837-14809 explicitly')
+            }
+        } elseif ($detected -and -not $script:NonInteractive) {
+            Info "Auto-detected Jira ID '$($detected.Id)' from $($detected.Source) (press Enter to use it)."
+            $script:LastJiraId = $detected.Id
+        }
+    }
+
     $tries = 0
     while ($true) {
         if (-not $script:JiraId) {
-            $v = Read-Value 'Jira Task ID (e.g. PROJ-123)' $script:LastJiraId
-            if ($null -eq $v) { Die $EX_USAGE 'Missing Jira ID.' @('Pass --jira PROJ-123') }
+            $v = Read-Value 'Jira Task ID (e.g. OSKDC33837-14809)' $script:LastJiraId
+            if ($null -eq $v) { Die $EX_USAGE 'Missing Jira ID.' @('Pass --jira OSKDC33837-14809 or --jira-from-branch') }
             $script:JiraId = $v
         }
         $script:JiraId = $script:JiraId.Trim().ToUpperInvariant()
         if ($script:JiraId -cmatch $script:JiraRegex) { $script:LastJiraId = $script:JiraId; break }
-        if ($script:NonInteractive) { Die $EX_USAGE "Invalid Jira ID '$($script:JiraId)'." @('Expected a key like PROJ-123 (LETTERS-NUMBER)') }
-        Warn "Invalid Jira ID '$($script:JiraId)' - expected something like PROJ-123."
+        if ($script:NonInteractive) { Die $EX_USAGE "Invalid Jira ID '$($script:JiraId)'." @('Expected a key like OSKDC33837-14809 (LETTERS-NUMBER)') }
+        Warn "Invalid Jira ID '$($script:JiraId)' - expected something like OSKDC33837-14809."
         $script:JiraId = ''; $tries++
         if ($tries -ge 3) { Die $EX_USAGE 'Too many invalid Jira IDs.' }
     }

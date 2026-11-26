@@ -1,4 +1,4 @@
-# AUTOSAR Git + Jira + GitLab Complete Documentation (`git_flow` v2.7)
+# AUTOSAR Git + Jira + GitLab Complete Documentation (`git_flow` v2.8)
 
 This document covers every detail of the `git_flow` workflow assistant: why it exists, where to put it, how to run it, every screen and prompt in sequence, every safety check and edge case, all command-line flags, environment variables, exit codes, and recovery steps.
 
@@ -222,11 +222,14 @@ When you select a specific component (e.g., `dcm`), the script automatically ent
 When you choose **`[1] Start New Branch`** from the menu (or run `.\git_flow.bat -c dcm --branch`):
 
 #### Step 5.1: Jira ID, Prefix Type & Mandatory Branch Title
-1. **Jira Task ID:**
-   - Prompts: `Jira Task ID (e.g. PROJ-123):`
-   - Automatically converts lowercase (`proj-123` -> `PROJ-123`).
-   - Validates against `<PROJECT_KEY>-<NUMBER>` (`^[A-Z][A-Z0-9_]*-[0-9]+$`). Gives 3 attempts if mistyped.
-   - If you already worked on another component in the same session, it pre-fills `[PROJ-123]` so you just press Enter.
+1. **Jira Task ID (Auto-Detected from Branch or Changed Files):**
+   - Automatically checks for a Jira ID (like `OSKDC33837-14809`) in:
+     1. Your **current branch name** (e.g. `feature/OSKDC33837-14809-ucl-10-02`)
+     2. **Changed / untracked file names**
+     3. **Added/modified lines in your diff** (e.g. Jira ID inside a Rhapsody or C comment)
+     4. The **last Jira ID** used in this session
+   - Pre-fills `[OSKDC33837-14809]` at the prompt so you just press **Enter** — or pass `--jira-from-branch` on the CLI to extract it automatically without prompting!
+   - Automatically converts lowercase (`oskdc33837-14809` -> `OSKDC33837-14809`) and validates against `<PROJECT_KEY>-<NUMBER>`.
 2. **Branch Prefix / Type:**
    ```text
    Select branch prefix / type:
@@ -456,7 +459,8 @@ Both `git_flow.ps1` / `git_flow.bat` and `git_flow.sh` accept identical flags (P
 | `--update` | | Update current work branch with latest `origin/develop` (conflict-checked; rebase if unpushed, merge if pushed) |
 | `--discard` | | Safely discard unwanted modified/untracked files (automatically saves a `git stash` backup first) |
 | `--component <name>` | `-c <name>` | Target component repo name (e.g. `dcm`), relative path (`components/dcm`), or comma-separated list for multi-component branching (`can,dcm`) |
-| `--jira <ID>` | `-j <ID>` | Jira Task ID (e.g. `PROJ-123`) |
+| `--jira <ID>` | `-j <ID>` | Jira Task ID (e.g. `OSKDC33837-14809`) |
+| `--jira-from-branch` | | Automatically extract the Jira ID from the current branch name or changed files/diff |
 | `--type <type>` | `-t <type>` | Branch prefix type: `none` (default: `PROJ-123-title`), `feature`, `bugfix`, or `hotfix` |
 | `--desc "<title>"` | `-d "<title>"` | Required branch title / short description |
 | `--base <branch>` | `-b <branch>` | Target base branch (default: `develop`) |
