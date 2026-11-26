@@ -1,4 +1,4 @@
-# AUTOSAR Git + Jira + GitLab Complete Documentation (`git_flow` v2.5)
+# AUTOSAR Git + Jira + GitLab Complete Documentation (`git_flow` v2.6)
 
 This document covers every detail of the `git_flow` workflow assistant: why it exists, where to put it, how to run it, every screen and prompt in sequence, every safety check and edge case, all command-line flags, environment variables, exit codes, and recovery steps.
 
@@ -250,10 +250,17 @@ When you choose **`[1] Start New Branch`** from the menu (or run `.\git_flow.bat
   - If your current HEAD commit is not reachable from any branch or tag, switching branches would orphan those commits.
   - The script offers to save them on a safety branch first:
     `Create safety branch 'rescue/detached-<sha>' to keep them? [Y/n]`
-- **Case: You have uncommitted modified files (`Protect-DirtyTree`):**
+- **Case: You have uncommitted modified files (e.g. Rhapsody `.rpwx` / `.sbsx` edits made before branching):**
   - Lists the modified files and asks:
-    `Stash them so the new branch starts clean? [y/N]`
-  - If you answer `y` (or pass `--stash`), it runs `git stash push -m "git_flow auto-stash <timestamp> before <branch>"` and prints a reminder at the very end of the script showing how to restore them (`git stash pop`).
+    ```text
+    How would you like to handle these uncommitted changes?
+      [1] Carry changes to new branch (recommended - keeps modified files untouched)
+      [2] Stash changes and create clean branch off latest develop
+      [3] Cancel
+    Enter choice [1]:
+    ```
+  - **Option `[1]` (Default — Carry changes, or `--carry`):** Runs `git checkout -b <branch-name>` directly so your open Rhapsody / model files are **carried onto the new branch without being stashed, reverted, or touched on disk**. (If your current base is behind `origin/develop`, it reminds you to run `[7] Update branch with latest develop` after committing.)
+  - **Option `[2]` (Stash, or `--stash`):** Runs `git stash push -m "git_flow auto-stash <timestamp> before <branch>"`, syncs `develop`, creates a clean branch off latest `develop`, and prints a reminder on how to restore with `git stash pop`.
 
 #### Step 5.4: Finding, Checking Out & Pulling `develop`, Then Creating Your Branch
 1. Verifies `origin/develop` exists on the remote (explicitly fetching `+refs/heads/develop:refs/remotes/origin/develop` if missing from local remote-tracking refs).
@@ -451,6 +458,7 @@ Both `git_flow.ps1` / `git_flow.bat` and `git_flow.sh` accept identical flags (P
 | `--assignee <cdsid>` | `-a <cdsid>` | GitLab Assignee CDS ID (e.g. `jfernan1`) |
 | `--reviewer <cdsid>` | | GitLab Reviewer CDS ID(s) (e.g. `rkumar2` or `"rkumar2,asmith3"`) |
 | `--all` | | Automatically stage all modified and untracked files (`git add -A`) when committing |
+| `--carry` | | Carry uncommitted changes directly onto the new branch without stashing (ideal for Rhapsody `.rpwx`/`.sbsx` edits) |
 | `--stash` | | Automatically stash uncommitted tracked changes before creating a new branch |
 | `--dry-run` | `-n` | Simulate and print every mutating Git command without executing it |
 | `--yes` | `-y` | Non-interactive mode: never prompt, use safe defaults, fail fast if required input is missing |

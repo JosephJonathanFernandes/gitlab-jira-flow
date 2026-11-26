@@ -41,6 +41,7 @@
   BEHAVIOUR
     -n, --dry-run     Show every mutating command without running it
     -y, --yes         Non-interactive: never prompt, use safe defaults
+        --carry       Carry uncommitted changes onto the new branch (without stashing)
         --stash       Auto-stash tracked changes before creating a branch
         --all         Stage everything when nothing is staged (git add -A)
         --draft       Create the MR/PR as draft
@@ -61,7 +62,7 @@
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:VERSION = '2.5.0'
+$script:VERSION = '2.6.0'
 $EX_USAGE = 2; $EX_NOTFOUND = 3; $EX_STATE = 4; $EX_NETWORK = 5
 $EX_PROTECTED = 6; $EX_GIT = 7; $EX_MR = 8; $EX_ABORT = 130
 
@@ -81,7 +82,7 @@ $script:BranchRegex = '^((feature|bugfix|hotfix)/)?' + $script:JiraPattern + '-.
 
 # ------------------------------------------------------------------- state ----
 $script:DryRun = $false; $script:Yes = $false; $script:NonInteractive = $false; $script:UseColor = $true
-$script:NoFetch = $false; $script:Force = $false; $script:StageAll = $false; $script:AutoStash = $false; $script:Draft = $false
+$script:NoFetch = $false; $script:Force = $false; $script:StageAll = $false; $script:AutoStash = $false; $script:CarryChanges = $false; $script:CarryFlag = $false; $script:Draft = $false
 $script:DoBranch = $false; $script:DoCommit = $false; $script:DoPush = $false; $script:DoMr = $false; $script:DoMrText = $false
 $script:DoSync = $false; $script:DoStatus = $false; $script:DoUndo = $false; $script:DoUpdate = $false; $script:DoDiscard = $false
 $script:Component = ''; $script:JiraId = ''; $script:LastJiraId = ''; $script:BranchType = ''; $script:Desc = ''; $script:CommitMsg = ''
@@ -257,6 +258,7 @@ function Parse-Args([object[]]$Argv) {
             'discard' { $script:DoDiscard = $true }
             'draft' { $script:Draft = $true }
             'all' { $script:StageAll = $true }
+            'carry' { $script:CarryFlag = $true }
             'stash' { $script:AutoStash = $true }
             'nofetch' { $script:NoFetch = $true }
             'force' { $script:Force = $true }
@@ -923,17 +925,50 @@ function Test-BranchFree {
 
 # ------------------------------------------------------- action: branch ------
 function Protect-DirtyTree {
+    $script:CarryChanges = $false
     $changes = Git-Out status --porcelain --untracked-files=no
     if (-not $changes) { return }
-    Warn 'You have uncommitted changes to tracked files (untracked files are left alone):'
+    Warn 'Uncommitted changes detected in tracked files:'
     Git-Show status -s --untracked-files=no
-    if (Confirm-Action 'Stash them so the new branch starts clean?' 'n' $script:AutoStash) {
+    if ($script:CarryFlag) {
+        Info 'Carrying uncommitted changes to the new branch (--carry).'
+        $script:CarryChanges = $true
+        return
+    }
+    if ($script:AutoStash) {
         $script:StashMsg = "git_flow auto-stash $(Get-Date -Format 'yyyyMMdd-HHmmss') before $($script:BranchName)"
         Run-Git @('stash', 'push', '-m', $script:StashMsg)
         if (-not $script:DryRun) { $script:StashCreated = $true }
         Ok 'Changes stashed.'
-    } else {
-        Die $EX_STATE 'Uncommitted changes would be dragged onto the new branch.' @("Commit them:  $($script:Self) --commit `"message`"", 'Or stash them: git stash push -m wip     (or re-run with --stash)')
+        return
+    }
+    if ($script:NonInteractive) {
+        Die $EX_STATE 'Uncommitted changes detected in tracked files.' @('Pass --carry to carry them onto the new branch, or --stash to stash them first')
+    }
+    Write-Host ''
+    Write-Host 'How would you like to handle these uncommitted changes?'
+    Write-Host '  [1] Carry changes to new branch (recommended - keeps modified files untouched)'
+    Write-Host "  [2] Stash changes and create clean branch off latest $($script:BaseBranch)"
+    Write-Host '  [3] Cancel'
+    $ch = Read-Value 'Enter choice' '1'
+    switch ($ch.ToLowerInvariant()) {
+        { $_ -in @('1', 'carry') } {
+            $script:CarryChanges = $true
+            Info 'Will carry your uncommitted changes onto the new branch.'
+        }
+        { $_ -in @('2', 'stash') } {
+            $script:StashMsg = "git_flow auto-stash $(Get-Date -Format 'yyyyMMdd-HHmmss') before $($script:BranchName)"
+            Run-Git @('stash', 'push', '-m', $script:StashMsg)
+            if (-not $script:DryRun) { $script:StashCreated = $true }
+            Ok 'Changes stashed.'
+        }
+        { $_ -in @('3', 'cancel', 'q', 'quit') } {
+            Die $EX_ABORT 'Cancelled - no branch was created and your files were not touched.'
+        }
+        default {
+            Warn "Unrecognised choice; carrying changes to the new branch."
+            $script:CarryChanges = $true
+        }
     }
 }
 
@@ -963,16 +998,27 @@ function Invoke-Branch {
     }
     if ($script:Detached) { Protect-DetachedHead }
     Protect-DirtyTree
-    $syncedLocal = Sync-LocalBaseBranch
-    Step "Creating branch '$($script:BranchName)'"
-    if ($syncedLocal) {
+    if ($script:CarryChanges) {
+        Step "Creating branch '$($script:BranchName)' (carrying uncommitted changes)"
         Run-Git @('checkout', '-b', $script:BranchName)
+        Ok "Now on $($script:BranchName) (your uncommitted changes were carried over safely without touching files on disk)."
+        $behindBase = [int](Git-Out rev-list --count "HEAD..$($script:Remote)/$($script:BaseBranch)" --)
+        if ($behindBase -gt 0) {
+            Info "Note: Your current base is $behindBase commit(s) behind $($script:Remote)/$($script:BaseBranch)."
+            Hint "After committing your changes, you can run [7] Update branch with latest $($script:BaseBranch) before pushing."
+        }
     } else {
-        Run-Git @('checkout', '-b', $script:BranchName, '--no-track', "$($script:Remote)/$($script:BaseBranch)")
+        $syncedLocal = Sync-LocalBaseBranch
+        Step "Creating branch '$($script:BranchName)'"
+        if ($syncedLocal) {
+            Run-Git @('checkout', '-b', $script:BranchName)
+        } else {
+            Run-Git @('checkout', '-b', $script:BranchName, '--no-track', "$($script:Remote)/$($script:BaseBranch)")
+        }
+        Ok "Now on $($script:BranchName) (branched from latest $($script:BaseBranch))."
     }
-    Ok "Now on $($script:BranchName) (branched from latest $($script:BaseBranch))."
     Write-Host ''
-    Write-Host 'Next:  edit code, then run from Main Repo:'
+    Write-Host 'Next:  edit/review code, then run from Main Repo:'
     Write-Host '  .\git_flow.bat'
 }
 
@@ -1695,10 +1741,15 @@ function Invoke-MultiBranch([string]$Root, [string[]]$Repos) {
             }
             if ($script:Detached) { Protect-DetachedHead }
             Protect-DirtyTree
-            $syncedLocal = Sync-LocalBaseBranch
-            if ($syncedLocal) { Run-Git @('checkout', '-b', $targetBranch) }
-            else { Run-Git @('checkout', '-b', $targetBranch, '--no-track', "$($script:Remote)/$($script:BaseBranch)") }
-            Ok "[$label] Created branch '$targetBranch' off latest '$($script:BaseBranch)'."
+            if ($script:CarryChanges) {
+                Run-Git @('checkout', '-b', $targetBranch)
+                Ok "[$label] Created branch '$targetBranch' (carried uncommitted changes safely)."
+            } else {
+                $syncedLocal = Sync-LocalBaseBranch
+                if ($syncedLocal) { Run-Git @('checkout', '-b', $targetBranch) }
+                else { Run-Git @('checkout', '-b', $targetBranch, '--no-track', "$($script:Remote)/$($script:BaseBranch)") }
+                Ok "[$label] Created branch '$targetBranch' off latest '$($script:BaseBranch)'."
+            }
             $created++
         } catch {
             Warn "[$label] Failed: $($_.Exception.Message)"
@@ -1826,7 +1877,7 @@ function Reset-InteractiveRunState {
     $script:Component = ''; $script:JiraId = ''; $script:BranchType = ''; $script:Desc = ''; $script:CommitMsg = ''
     $script:Assignee = ''; $script:Reviewer = ''; $script:MrPeoplePrompted = $false
     $script:RepoDir = ''; $script:MultiRepos = @(); $script:CurBranch = ''; $script:Detached = $false
-    $script:BranchName = ''; $script:Sanitized = ''; $script:SimCommit = $false
+    $script:BranchName = ''; $script:Sanitized = ''; $script:SimCommit = $false; $script:CarryChanges = $false
     $script:HasStaged = $false; $script:FormattedMsg = ''; $script:PushUrl = ''
     $script:MrTitle = ''; $script:MrBody = ''; $script:MrCreatedViaPush = $false; $script:MrMode = ''
 }

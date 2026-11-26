@@ -31,7 +31,7 @@ fi
 
 set -Eeuo pipefail
 
-readonly VERSION="2.5.0"
+readonly VERSION="2.6.0"
 readonly EX_USAGE=2 EX_NOTFOUND=3 EX_STATE=4 EX_NETWORK=5 EX_PROTECTED=6 EX_GIT=7 EX_MR=8 EX_ABORT=130
 
 # ------------------------------------------------------------ configuration ---
@@ -53,7 +53,7 @@ ORIG_DIR="$PWD"
 WORKSPACE_ROOT="$PWD"
 SELF="$0"
 DRY_RUN=false; YES=false; NONINTERACTIVE=false; USE_COLOR=true
-NO_FETCH=false; FORCE=false; STAGE_ALL=false; AUTO_STASH=false; DRAFT=false
+NO_FETCH=false; FORCE=false; STAGE_ALL=false; AUTO_STASH=false; CARRY_CHANGES=false; CARRY_FLAG=false; DRAFT=false
 DO_BRANCH=false; DO_COMMIT=false; DO_PUSH=false; DO_MR=false; DO_MRTEXT=false
 DO_SYNC=false; DO_STATUS=false; DO_UNDO=false; DO_UPDATE=false; DO_DISCARD=false
 COMPONENT=""; JIRA_ID=""; LAST_JIRA_ID=""; BRANCH_TYPE=""; DESC=""; COMMIT_MSG=""
@@ -228,6 +228,7 @@ INPUTS
 BEHAVIOUR
   -n, --dry-run     Show every mutating command without running it
   -y, --yes         Non-interactive: never prompt, use safe defaults
+      --carry       Carry uncommitted changes onto the new branch (without stashing)
       --stash       Auto-stash tracked changes before creating a branch
       --all         Stage everything when nothing is staged (git add -A)
       --draft       Create the MR/PR as draft
@@ -286,6 +287,7 @@ parse_args() {
       --discard)       DO_DISCARD=true ;;
       --draft)         DRAFT=true ;;
       --all)           STAGE_ALL=true ;;
+      --carry)         CARRY_FLAG=true ;;
       --stash)         AUTO_STASH=true ;;
       --no-fetch)      NO_FETCH=true ;;
       --force)         FORCE=true ;;
@@ -950,21 +952,49 @@ check_branch_free() {
 
 # ------------------------------------------------------- action: branch ------
 guard_dirty_for_branch() {
+  CARRY_CHANGES=false
   local changes
   changes=$(git status --porcelain --untracked-files=no)
   if [[ -z "$changes" ]]; then return 0; fi
-  warn "You have uncommitted changes to tracked files (untracked files are left alone):"
+  warn "Uncommitted changes detected in tracked files:"
   git status -s --untracked-files=no
-  if confirm "Stash them so the new branch starts clean?" n "$(yn "$AUTO_STASH")"; then
+  if $CARRY_FLAG; then
+    info "Carrying uncommitted changes to the new branch (--carry)."
+    CARRY_CHANGES=true
+    return 0
+  fi
+  if $AUTO_STASH; then
     STASH_MSG="git_flow auto-stash $(date +%Y%m%d-%H%M%S) before $BRANCH_NAME"
     run git stash push -m "$STASH_MSG"
     if ! $DRY_RUN; then STASH_CREATED=true; fi
     ok "Changes stashed."
-  else
-    die "$EX_STATE" "Uncommitted changes would be dragged onto the new branch." \
-      "Commit them:  $SELF --commit \"message\"" \
-      "Or stash them: git stash push -m wip     (or re-run with --stash)"
+    return 0
   fi
+  if $NONINTERACTIVE; then
+    die "$EX_STATE" "Uncommitted changes detected in tracked files." \
+      "Pass --carry to carry them onto the new branch, or --stash to stash them first"
+  fi
+  printf '\n%s\n' \
+    "How would you like to handle these uncommitted changes?" \
+    "  [1] Carry changes to new branch (recommended - keeps modified files untouched)" \
+    "  [2] Stash changes and create clean branch off latest $BASE_BRANCH" \
+    "  [3] Cancel"
+  prompt "Enter choice" "1" || true
+  case "$(lower "$REPLY_VAL")" in
+    1|carry)
+      CARRY_CHANGES=true
+      info "Will carry your uncommitted changes onto the new branch." ;;
+    2|stash)
+      STASH_MSG="git_flow auto-stash $(date +%Y%m%d-%H%M%S) before $BRANCH_NAME"
+      run git stash push -m "$STASH_MSG"
+      if ! $DRY_RUN; then STASH_CREATED=true; fi
+      ok "Changes stashed." ;;
+    3|cancel|q|quit)
+      die "$EX_ABORT" "Cancelled - no branch was created and your files were not touched." ;;
+    *)
+      warn "Unrecognised choice; carrying changes to the new branch."
+      CARRY_CHANGES=true ;;
+  esac
 }
 
 handle_detached_for_branch() {
@@ -993,15 +1023,27 @@ do_branch() {
   fi
   if $DETACHED; then handle_detached_for_branch; fi
   guard_dirty_for_branch
-  if sync_local_base_branch; then
-    step "Creating branch '$BRANCH_NAME'"
+  if $CARRY_CHANGES; then
+    step "Creating branch '$BRANCH_NAME' (carrying uncommitted changes)"
     run git checkout -b "$BRANCH_NAME"
+    ok "Now on ${C_BOLD}$BRANCH_NAME${C_RESET} (your uncommitted changes were carried over safely without touching files on disk)."
+    local behind_base
+    behind_base=$(git rev-list --count "HEAD..$REMOTE/$BASE_BRANCH" -- 2>/dev/null || echo 0)
+    if [[ "$behind_base" -gt 0 ]]; then
+      info "Note: Your current base is $behind_base commit(s) behind $REMOTE/$BASE_BRANCH."
+      hint "After committing your changes, you can run [7] Update branch with latest $BASE_BRANCH before pushing."
+    fi
   else
-    step "Creating branch off $REMOTE/$BASE_BRANCH"
-    run git checkout -b "$BRANCH_NAME" --no-track "$REMOTE/$BASE_BRANCH"
+    if sync_local_base_branch; then
+      step "Creating branch '$BRANCH_NAME'"
+      run git checkout -b "$BRANCH_NAME"
+    else
+      step "Creating branch off $REMOTE/$BASE_BRANCH"
+      run git checkout -b "$BRANCH_NAME" --no-track "$REMOTE/$BASE_BRANCH"
+    fi
+    ok "Now on ${C_BOLD}$BRANCH_NAME${C_RESET} (branched from latest $BASE_BRANCH)."
   fi
-  ok "Now on ${C_BOLD}$BRANCH_NAME${C_RESET} (branched from latest $BASE_BRANCH)."
-  printf '\n%s\n' "Next:  edit code, then run from Main Repo:"
+  printf '\n%s\n' "Next:  edit/review code, then run from Main Repo:"
   printf '%s\n' "  $SELF"
 }
 
@@ -1797,12 +1839,17 @@ do_multi_branch() {
     fi
     if $DETACHED; then handle_detached_for_branch; fi
     guard_dirty_for_branch
-    if sync_local_base_branch; then
+    if $CARRY_CHANGES; then
       run git checkout -b "$target_branch"
+      ok "[$label] Created branch '$target_branch' (carried uncommitted changes safely)."
     else
-      run git checkout -b "$target_branch" --no-track "$REMOTE/$BASE_BRANCH"
+      if sync_local_base_branch; then
+        run git checkout -b "$target_branch"
+      else
+        run git checkout -b "$target_branch" --no-track "$REMOTE/$BASE_BRANCH"
+      fi
+      ok "[$label] Created branch '$target_branch' off latest '$BASE_BRANCH'."
     fi
-    ok "[$label] Created branch '$target_branch' off latest '$BASE_BRANCH'."
     created=$((created + 1))
   done
   step "Multi-Component Branch Summary"
@@ -1924,7 +1971,7 @@ reset_interactive_run_state() {
   COMPONENT=""; JIRA_ID=""; BRANCH_TYPE=""; DESC=""; COMMIT_MSG=""
   ASSIGNEE=""; REVIEWER=""; MR_PEOPLE_PROMPTED=false
   REPO_DIR=""; MULTI_REPOS=(); CUR_BRANCH=""; DETACHED=false
-  BRANCH_NAME=""; SANITIZED=""; SIM_COMMIT=false
+  BRANCH_NAME=""; SANITIZED=""; SIM_COMMIT=false; CARRY_CHANGES=false
   HAS_STAGED=false; FORMATTED_MSG=""; PUSH_URL=""; MR_TITLE=""; MR_BODY=""; MR_CREATED_VIA_PUSH=false; MR_MODE=""
 }
 
