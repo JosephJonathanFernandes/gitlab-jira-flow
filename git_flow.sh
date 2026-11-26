@@ -31,7 +31,7 @@ fi
 
 set -Eeuo pipefail
 
-readonly VERSION="2.6.0"
+readonly VERSION="2.7.0"
 readonly EX_USAGE=2 EX_NOTFOUND=3 EX_STATE=4 EX_NETWORK=5 EX_PROTECTED=6 EX_GIT=7 EX_MR=8 EX_ABORT=130
 
 # ------------------------------------------------------------ configuration ---
@@ -696,11 +696,56 @@ preflight() {
   fi
 }
 
+show_categorized_changes() {
+  local -a rhapsody=() autosar=() deleted=() other=()
+  local ln st p tag p_low
+  while IFS= read -r ln; do
+    if [[ ${#ln} -lt 4 ]]; then continue; fi
+    st="${ln:0:2}"
+    p="${ln:3}"
+    if [[ "$p" == *" -> "* ]]; then p="${p##* -> }"; fi
+    p="${p#\"}"; p="${p%\"}"
+    tag=$(trim "$st")
+    p_low=$(lower "$p")
+    if [[ "$st" == *D* ]]; then
+      deleted+=("[$tag] $p")
+    elif [[ "$p_low" =~ \.(rpwx|rpy|sbsx|sbs|cls|clsx|cmp|cmpx|omd|omdx|msc|mscx|ucd|ucdx|hep|prp|rpl|rplx)$ ]]; then
+      rhapsody+=("[$tag] $p")
+    elif [[ "$p_low" =~ \.(arxml|dbc|ldf|a2l|cdd|odx|pdx|ecuc|dpa|dcf)$ ]]; then
+      autosar+=("[$tag] $p")
+    else
+      other+=("[$tag] $p")
+    fi
+  done < <(git -c core.quotepath=off status --porcelain 2>/dev/null || true)
+
+  if [[ ${#rhapsody[@]} -eq 0 && ${#autosar[@]} -eq 0 && ${#deleted[@]} -eq 0 && ${#other[@]} -eq 0 ]]; then
+    ok "Working tree clean."
+    return 0
+  fi
+  local f
+  if [[ ${#rhapsody[@]} -gt 0 ]]; then
+    printf '\n%s  Rhapsody Changes (%d):%s\n' "$C_CYAN" "${#rhapsody[@]}" "$C_RESET"
+    for f in "${rhapsody[@]}"; do printf '    %s\n' "$f"; done
+  fi
+  if [[ ${#autosar[@]} -gt 0 ]]; then
+    printf '\n%s  AUTOSAR / ARXML Changes (%d):%s\n' "$C_YELLOW" "${#autosar[@]}" "$C_RESET"
+    for f in "${autosar[@]}"; do printf '    %s\n' "$f"; done
+  fi
+  if [[ ${#deleted[@]} -gt 0 ]]; then
+    printf '\n%s  Deleted Artifacts (%d):%s\n' "$C_RED" "${#deleted[@]}" "$C_RESET"
+    for f in "${deleted[@]}"; do printf '    %s\n' "$f"; done
+  fi
+  if [[ ${#other[@]} -gt 0 ]]; then
+    printf '\n%s  Source / Other Changes (%d):%s\n' "$C_BOLD" "${#other[@]}" "$C_RESET"
+    for f in "${other[@]}"; do printf '    %s\n' "$f"; done
+  fi
+}
+
 show_status() {
   step "Repository status"
   info "Repo   : $REPO_DIR"
   if $DETACHED; then warn "HEAD   : DETACHED at $(git rev-parse --short HEAD)"; else info "Branch : $CUR_BRANCH"; fi
-  git status -sb
+  show_categorized_changes
 }
 
 ensure_base_ref() {

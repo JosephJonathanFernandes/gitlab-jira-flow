@@ -1,4 +1,4 @@
-# AUTOSAR Git + Jira + GitLab Complete Documentation (`git_flow` v2.6)
+# AUTOSAR Git + Jira + GitLab Complete Documentation (`git_flow` v2.7)
 
 This document covers every detail of the `git_flow` workflow assistant: why it exists, where to put it, how to run it, every screen and prompt in sequence, every safety check and edge case, all command-line flags, environment variables, exit codes, and recovery steps.
 
@@ -208,6 +208,12 @@ When you select a specific component (e.g., `dcm`), the script automatically ent
 4. **Automatic `.repo` + Component `git fetch --all --prune`:**
    - Fetches `.repo` (if present in the workspace root) and then runs `git fetch --all --prune` in the selected component.
    - **If network/auth fails:** Clearly distinguishes between **VPN/DNS/Proxy unreachable** (exit code `5`, advising you to check VPN or use `--no-fetch`) vs. **Authentication/Permission failure** (SSH key not loaded or GitLab PAT expired).
+5. **AUTOSAR & Rhapsody Grouped File Summary:**
+   - Instead of a raw flat `git status` list, displays a clean design-review summary grouped into:
+     - **Rhapsody Changes** (`.rpwx`, `.rpy`, `.sbsx`, `.sbs`, `.cls`, `.clsx`, `.cmp`, `.omdx`, `.mscx`, etc.)
+     - **AUTOSAR / ARXML Changes** (`.arxml`, `.dbc`, `.ldf`, `.a2l`, `.cdd`, `.odx`, `.dpa`, etc.)
+     - **Deleted Artifacts** (any deleted model/config/source file, highlighted in red)
+     - **Source / Other Changes** (`.c`, `.h`, scripts, docs, etc.)
 
 ---
 

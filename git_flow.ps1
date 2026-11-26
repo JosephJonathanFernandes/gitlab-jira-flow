@@ -62,7 +62,7 @@
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:VERSION = '2.6.0'
+$script:VERSION = '2.7.0'
 $EX_USAGE = 2; $EX_NOTFOUND = 3; $EX_STATE = 4; $EX_NETWORK = 5
 $EX_PROTECTED = 6; $EX_GIT = 7; $EX_MR = 8; $EX_ABORT = 130
 
@@ -670,11 +670,63 @@ function Invoke-Preflight {
     }
 }
 
+function Show-CategorizedChanges {
+    $raw = Git-Out -c core.quotepath=off status --porcelain
+    $lines = @($raw -split "`n" | Where-Object { $_.Trim() })
+    if ($lines.Count -eq 0) {
+        Ok 'Working tree clean.'
+        return
+    }
+    $rhapsody = New-Object System.Collections.Generic.List[string]
+    $autosar  = New-Object System.Collections.Generic.List[string]
+    $deleted  = New-Object System.Collections.Generic.List[string]
+    $other    = New-Object System.Collections.Generic.List[string]
+
+    foreach ($ln in $lines) {
+        if ($ln.Length -lt 4) { continue }
+        $st = $ln.Substring(0, 2)
+        $path = $ln.Substring(3).Trim()
+        if ($path -match ' -> (.+)$') { $path = $Matches[1] }
+        $path = $path.Trim('"')
+        $tag = $st.Trim()
+        if ($st -match 'D') {
+            $deleted.Add("[$tag] $path")
+        } elseif ($path -imatch '\.(rpwx|rpy|sbsx|sbs|cls|clsx|cmp|cmpx|omd|omdx|msc|mscx|ucd|ucdx|hep|prp|rpl|rplx)$') {
+            $rhapsody.Add("[$tag] $path")
+        } elseif ($path -imatch '\.(arxml|dbc|ldf|a2l|cdd|odx|pdx|ecuc|dpa|dcf)$') {
+            $autosar.Add("[$tag] $path")
+        } else {
+            $other.Add("[$tag] $path")
+        }
+    }
+
+    if ($rhapsody.Count -gt 0) {
+        Write-Host ''
+        Write-Line "  Rhapsody Changes ($($rhapsody.Count)):" 'Cyan'
+        foreach ($f in $rhapsody) { Write-Host "    $f" }
+    }
+    if ($autosar.Count -gt 0) {
+        Write-Host ''
+        Write-Line "  AUTOSAR / ARXML Changes ($($autosar.Count)):" 'Yellow'
+        foreach ($f in $autosar) { Write-Host "    $f" }
+    }
+    if ($deleted.Count -gt 0) {
+        Write-Host ''
+        Write-Line "  Deleted Artifacts ($($deleted.Count)):" 'Red'
+        foreach ($f in $deleted) { Write-Host "    $f" }
+    }
+    if ($other.Count -gt 0) {
+        Write-Host ''
+        Write-Line "  Source / Other Changes ($($other.Count)):" 'White'
+        foreach ($f in $other) { Write-Host "    $f" }
+    }
+}
+
 function Show-Status {
     Step 'Repository status'
     Info "Repo   : $($script:RepoDir)"
     if ($script:Detached) { Warn ('HEAD   : DETACHED at ' + (Git-Out rev-parse --short HEAD)) } else { Info "Branch : $($script:CurBranch)" }
-    Git-Show status -sb
+    Show-CategorizedChanges
 }
 
 function Confirm-BaseRef {
