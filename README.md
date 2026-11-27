@@ -5,8 +5,8 @@ Interactive Git, Jira, and GitLab MR workflow assistant for multi-repo AUTOSAR w
 ## Files
 
 - [`git_flow.bat`](git_flow.bat) — Windows launcher (bypasses PowerShell execution policy and pauses if double-clicked)
-- [`git_flow.ps1`](git_flow.ps1) — PowerShell engine (v2.3.0, Windows PowerShell 5.1+ / PS 7+)
-- [`git_flow.sh`](git_flow.sh) — Bash engine (v2.3.0, Git Bash / WSL / Linux / macOS)
+- [`git_flow.ps1`](git_flow.ps1) — PowerShell engine (v3.0.0, Windows PowerShell 5.1+ / PS 7+)
+- [`git_flow.sh`](git_flow.sh) — Bash engine (v3.0.0, Git Bash / WSL / Linux / macOS)
 - [`GIT_FLOW_PLAYBOOK.md`](GIT_FLOW_PLAYBOOK.md) — Complete step-by-step documentation, flags, edge cases, and recovery guide
 
 ## Quick Start

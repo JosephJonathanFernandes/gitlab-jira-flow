@@ -16,6 +16,8 @@
     - Pushing with 'git push --set-upstream' and creating/opening GitLab Merge Requests
 
   ACTIONS
+    --wizard              One-command full workflow: Branch + Commit + Push + MR
+    --health              Compact workspace health summary (changed, ahead, detached, on develop)
     --status              Show branch, modified files & unpushed commits across all workspace repos
     --sync                Run fetch --all + checkout develop + pull across all workspace repos
     --branch              Fetch, update develop, and create branch for Jira task (supports -c can,dcm)
@@ -45,6 +47,7 @@
         --carry       Carry uncommitted changes onto the new branch (without stashing)
         --stash       Auto-stash tracked changes before creating a branch
         --all         Stage everything when nothing is staged (git add -A)
+        --model-only  Stage only Rhapsody model files (*.rpwx, *.sbsx, *.rpy), skipping .bak/.tmp/generated
         --draft       Create the MR/PR as draft
         --no-fetch    Skip 'git fetch' (offline work; push still needs network)
         --force       Bypass branch-name / Jira-mismatch / sensitive-file checks
@@ -63,7 +66,7 @@
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:VERSION = '2.8.0'
+$script:VERSION = '3.0.0'
 $EX_USAGE = 2; $EX_NOTFOUND = 3; $EX_STATE = 4; $EX_NETWORK = 5
 $EX_PROTECTED = 6; $EX_GIT = 7; $EX_MR = 8; $EX_ABORT = 130
 
@@ -83,9 +86,9 @@ $script:BranchRegex = '^((feature|bugfix|hotfix)/)?' + $script:JiraPattern + '-.
 
 # ------------------------------------------------------------------- state ----
 $script:DryRun = $false; $script:Yes = $false; $script:NonInteractive = $false; $script:UseColor = $true
-$script:NoFetch = $false; $script:Force = $false; $script:StageAll = $false; $script:AutoStash = $false; $script:CarryChanges = $false; $script:CarryFlag = $false; $script:JiraFromBranch = $false; $script:Draft = $false
+$script:NoFetch = $false; $script:Force = $false; $script:StageAll = $false; $script:ModelOnly = $false; $script:AutoStash = $false; $script:CarryChanges = $false; $script:CarryFlag = $false; $script:JiraFromBranch = $false; $script:Draft = $false
 $script:DoBranch = $false; $script:DoCommit = $false; $script:DoPush = $false; $script:DoMr = $false; $script:DoMrText = $false
-$script:DoSync = $false; $script:DoStatus = $false; $script:DoUndo = $false; $script:DoUpdate = $false; $script:DoDiscard = $false
+$script:DoSync = $false; $script:DoStatus = $false; $script:DoHealth = $false; $script:DoWizard = $false; $script:DoUndo = $false; $script:DoUpdate = $false; $script:DoDiscard = $false
 $script:Component = ''; $script:JiraId = ''; $script:LastJiraId = ''; $script:BranchType = ''; $script:Desc = ''; $script:CommitMsg = ''
 $script:Assignee = if ($env:GIT_FLOW_ASSIGNEE) { $env:GIT_FLOW_ASSIGNEE } else { '' }
 $script:Reviewer = if ($env:GIT_FLOW_REVIEWER) { $env:GIT_FLOW_REVIEWER } else { '' }
@@ -254,11 +257,14 @@ function Parse-Args([object[]]$Argv) {
             'mrtext' { $script:DoMrText = $true }
             'sync' { $script:DoSync = $true }
             'status' { $script:DoStatus = $true }
+            'health' { $script:DoHealth = $true }
+            'wizard' { $script:DoWizard = $true }
             { $_ -in @('undo', 'undocommit') } { $script:DoUndo = $true }
             'update' { $script:DoUpdate = $true }
             'discard' { $script:DoDiscard = $true }
             'draft' { $script:Draft = $true }
             'all' { $script:StageAll = $true }
+            'modelonly' { $script:ModelOnly = $true }
             'carry' { $script:CarryFlag = $true }
             'jirafrombranch' { $script:JiraFromBranch = $true }
             'stash' { $script:AutoStash = $true }
@@ -278,16 +284,16 @@ function Parse-Args([object[]]$Argv) {
 }
 
 function Determine-Mode {
-    if ($script:DoMr) { $script:DoPush = $true }
-    if (-not ($script:DoBranch -or $script:DoCommit -or $script:DoPush -or $script:DoMrText -or $script:DoSync -or $script:DoStatus -or $script:DoUndo -or $script:DoUpdate -or $script:DoDiscard)) {
-        if ($script:JiraId -or $script:Desc -or $script:BranchType) { $script:DoBranch = $true }
+    if ($script:DoMr -and -not $script:DoWizard) { $script:DoPush = $true }
+    if (-not ($script:DoBranch -or $script:DoCommit -or $script:DoPush -or $script:DoMrText -or $script:DoSync -or $script:DoStatus -or $script:DoHealth -or $script:DoWizard -or $script:DoUndo -or $script:DoUpdate -or $script:DoDiscard)) {
+        if ($script:JiraId -or $script:Desc -or $script:BranchType -or $script:JiraFromBranch) { $script:DoBranch = $true }
         elseif ($script:NonInteractive) {
-            Die $EX_USAGE 'No action given and no terminal available for the menu.' @('Use one of: --status | --sync | --branch | --commit "msg" | --push | --mr-text | --undo-commit | --update | --discard', "See: $($script:Self) --help")
+            Die $EX_USAGE 'No action given and no terminal available for the menu.' @('Use one of: --wizard | --health | --status | --sync | --branch | --commit "msg" | --push | --mr-text | --undo-commit | --update | --discard', "See: $($script:Self) --help")
         }
         else { $script:MenuMode = $true }
     }
-    if ($script:DoBranch -and ($script:DoCommit -or $script:DoPush -or $script:DoMrText -or $script:DoSync -or $script:DoStatus -or $script:DoUndo -or $script:DoUpdate -or $script:DoDiscard)) {
-        Die $EX_USAGE '--branch cannot be combined with --commit/--push/--mr/--sync/--status/--undo-commit/--update/--discard.' @('Run it twice: first --branch, then --commit ... --push')
+    if ($script:DoBranch -and ($script:DoCommit -or $script:DoPush -or $script:DoMrText -or $script:DoSync -or $script:DoStatus -or $script:DoHealth -or $script:DoWizard -or $script:DoUndo -or $script:DoUpdate -or $script:DoDiscard)) {
+        Die $EX_USAGE '--branch cannot be combined with other action flags (use --wizard for branch + commit + push in one go).'
     }
     if ($script:DoMrText -and ($script:DoCommit -or $script:DoPush)) {
         Die $EX_USAGE '--mr-text cannot be combined with --commit/--push/--mr.'
@@ -329,7 +335,7 @@ function Get-RepoQuickStatus([string]$Dir) {
     $detached = ($script:GitExit -ne 0 -or -not $br)
     if ($detached) {
         $sha = Git-Out -C $Dir rev-parse --short HEAD
-        $brLabel = if ($sha) { "DETACHED@$sha" } else { 'UNINITIALIZED' }
+        $brLabel = if ($sha) { "DETACHED@$sha (manifest-managed)" } else { 'UNINITIALIZED' }
     } else {
         $brLabel = $br
     }
@@ -371,7 +377,7 @@ function Show-WorkspaceDashboard([string]$Root, [string[]]$Repos) {
         $st = $statuses[$i]
         $idx = ("[{0}]" -f ($i + 1)).PadLeft(5)
         $lbl = $st.Label.PadRight(28)
-        $br = ("[" + $st.Branch + "]").PadRight(28)
+        $br = ("[" + $st.Branch + "]").PadRight(36)
         $unpushedInfo = if ($st.UnpushedCount -gt 0) { ", $($st.UnpushedCount) unpushed commit(s)" } else { '' }
         if ($st.ChangedCount -gt 0) {
             Write-Line ("  $idx * $lbl $br -> $($st.ChangedCount) changed file(s)$unpushedInfo") 'Yellow'
@@ -386,6 +392,48 @@ function Show-WorkspaceDashboard([string]$Root, [string[]]$Repos) {
         }
     }
     return $statuses
+}
+
+function Show-WorkspaceHealth([string]$Root, [string[]]$Repos) {
+    Step 'Workspace Health'
+    Write-Host "Repositories: $($Repos.Count)"
+    $changed = New-Object System.Collections.Generic.List[string]
+    $ahead   = New-Object System.Collections.Generic.List[string]
+    $onBase  = New-Object System.Collections.Generic.List[string]
+    $onWork  = New-Object System.Collections.Generic.List[string]
+    $detachedCount = 0
+
+    foreach ($r in $Repos) {
+        $st = Get-RepoQuickStatus $r
+        $lbl = Get-RepoRelativeLabel $Root $r
+        if ($st.ChangedCount -gt 0) { $changed.Add("$lbl ($($st.ChangedCount) file(s))") }
+        if ($st.UnpushedCount -gt 0) { $ahead.Add("$lbl ($($st.UnpushedCount) commit(s))") }
+        if ($st.Detached) { $detachedCount++ }
+        elseif ($st.Branch -eq $script:BaseBranch) { $onBase.Add($lbl) }
+        else { $onWork.Add("$lbl [$($st.Branch)]") }
+    }
+
+    Write-Host ''
+    Write-Line 'Changed:' 'Yellow'
+    if ($changed.Count -gt 0) { foreach ($c in $changed) { Write-Host "  $c" } } else { Write-Host '  none' }
+
+    Write-Host ''
+    Write-Line 'Ahead of remote:' 'Cyan'
+    if ($ahead.Count -gt 0) { foreach ($a in $ahead) { Write-Host "  $a" } } else { Write-Host '  none' }
+
+    Write-Host ''
+    Write-Line 'Detached (manifest-managed):' 'DarkGray'
+    Write-Host "  $detachedCount repos"
+
+    Write-Host ''
+    Write-Line "On $($script:BaseBranch):" 'Green'
+    if ($onBase.Count -gt 0) { foreach ($b in $onBase) { Write-Host "  $b" } } else { Write-Host '  none' }
+
+    if ($onWork.Count -gt 0) {
+        Write-Host ''
+        Write-Line 'On task / feature branches:' 'White'
+        foreach ($w in $onWork) { Write-Host "  $w" }
+    }
 }
 
 function Match-Repos([string]$Root, [string]$Name) {
@@ -503,12 +551,13 @@ function Resolve-Repo {
     }
 
     Write-Host ''
-    Write-Line "Tip: Type a number (1-$($all.Count)), multiple numbers/names to branch several components at once (e.g. '2 3' or 'can,dcm'), or 's' to Sync ALL repos." 'Cyan'
+    Write-Line "Tip: Type a number (1-$($all.Count)), '2 3' for multi-component branching, 'h' for compact health summary, or 's' to Sync ALL repos." 'Cyan'
     while ($true) {
-        $sel = Read-Host "Select repository (1-$($all.Count), e.g. '2 3', name, 's' = sync all, 'q' = quit)"
+        $sel = Read-Host "Select repository (1-$($all.Count), e.g. '2 3', name, 'h' = health, 's' = sync all, 'q' = quit)"
         if ([string]::IsNullOrWhiteSpace($sel)) { continue }
         $sel = $sel.Trim()
         if ($sel -match '^[qQ]$') { Die $EX_ABORT 'Cancelled.' }
+        if ($sel -match '^[hH]$') { Show-WorkspaceHealth $pwdPath $all; Write-Host ''; continue }
         if ($sel -match '^[sS0]$') {
             $script:DoSync = $true
             $script:RepoDir = $all[0]
@@ -727,7 +776,7 @@ function Show-CategorizedChanges {
 function Show-Status {
     Step 'Repository status'
     Info "Repo   : $($script:RepoDir)"
-    if ($script:Detached) { Warn ('HEAD   : DETACHED at ' + (Git-Out rev-parse --short HEAD)) } else { Info "Branch : $($script:CurBranch)" }
+    if ($script:Detached) { Info ('HEAD   : DETACHED at ' + (Git-Out rev-parse --short HEAD) + ' (manifest-managed)') } else { Info "Branch : $($script:CurBranch)" }
     Show-CategorizedChanges
 }
 
@@ -1118,6 +1167,16 @@ function Invoke-Branch {
 
 # --------------------------------------------- rescue / protected handling ----
 function Move-WorkToBranch([string]$Reason) {
+    $where = if ($script:CurBranch) { $script:CurBranch } else { 'DETACHED HEAD' }
+    $det = Detect-JiraId
+    $recJira = if ($script:JiraId) { $script:JiraId } elseif ($det) { $det.Id } elseif ($script:LastJiraId) { $script:LastJiraId } else { 'OSKDC33837-14809' }
+    Write-Host ''
+    Write-Line '================================================================' 'Red'
+    Write-Line '  WARNING: Protected Branch / Detached HEAD Detected!' 'Red'
+    Write-Line "  You are currently on:   $where" 'Yellow'
+    Write-Line "  Creating a commit directly on '$where' is NOT RECOMMENDED / BLOCKED." 'Yellow'
+    Write-Line "  Recommended branch:     ${recJira}-short-description" 'Cyan'
+    Write-Line '================================================================' 'Red'
     Warn $Reason
     $pending = Git-Out status --porcelain
     $ahead = 0
@@ -1125,14 +1184,13 @@ function Move-WorkToBranch([string]$Reason) {
         $ahead = [int](Git-Out rev-list --count "$($script:Remote)/$($script:CurBranch)..HEAD" --)
     }
     if (-not $pending -and $ahead -eq 0 -and -not $script:Detached) {
-        Die $EX_PROTECTED "You are on protected branch '$($script:CurBranch)' with nothing to move." @("Start new work with:  $($script:Self) --branch --jira PROJ-123 --desc `"short description`"")
+        Die $EX_PROTECTED "You are on protected branch '$($script:CurBranch)' with nothing to move." @("Start new work with:  $($script:Self) --branch --jira $recJira --desc `"short description`"")
     }
     if ($script:NonInteractive -and (-not $script:JiraId -or -not $script:Desc)) {
-        $where = if ($script:CurBranch) { $script:CurBranch } else { 'detached HEAD' }
-        Die $EX_PROTECTED "Refusing to commit/push on '$where'." @('Re-run with --jira PROJ-123 --desc "title" (and optional --type) to move your work to a new branch automatically', 'Or create it yourself: git checkout -b PROJ-123-short-desc')
+        Die $EX_PROTECTED "Refusing to commit/push on '$where'." @("Re-run with --jira $recJira --desc `"title`" (and optional --type) to move your work to a new branch automatically", "Or create it yourself: git checkout -b ${recJira}-short-desc")
     }
-    if (-not (Confirm-Action "Move your current work (uncommitted changes + $ahead local commit(s)) onto a new properly named branch?" 'y' $true)) {
-        Die $EX_PROTECTED 'Aborted - nothing was changed.' @('Create a branch first: git checkout -b PROJ-123-short-desc')
+    if (-not (Confirm-Action "Create a new Jira branch and move your current work (uncommitted changes + $ahead local commit(s)) onto it now?" 'y' $true)) {
+        Die $EX_PROTECTED 'Aborted - nothing was changed.' @("Create a branch first: git checkout -b ${recJira}-short-desc")
     }
     Read-BranchInputs
     if (Test-BranchFree) {
@@ -1175,7 +1233,7 @@ function Resolve-CommitJira {
         }
     } elseif ($fromBranch) {
         $script:JiraId = $fromBranch
-        if (-not $script:NonInteractive) { $script:JiraId = (Read-Value 'Jira Task ID' $script:JiraId).ToUpperInvariant() }
+        Info "Jira ID auto-detected from branch: $($script:JiraId)"
     } else {
         $v = Read-Value 'Jira Task ID (e.g. PROJ-123)' $script:LastJiraId
         if ($null -eq $v) { Die $EX_USAGE "Cannot infer a Jira ID from branch '$($script:CurBranch)'." @('Pass --jira PROJ-123') }
@@ -1286,6 +1344,22 @@ function Select-FilesInteractively {
     }
 }
 
+function Get-RhapsodyModelFiles {
+    $raw = Git-Out -c core.quotepath=off status --porcelain
+    $lines = @($raw -split "`n" | Where-Object { $_.Trim() })
+    $matched = New-Object System.Collections.Generic.List[string]
+    foreach ($ln in $lines) {
+        if ($ln.Length -lt 4) { continue }
+        $p = $ln.Substring(3).Trim()
+        if ($p -match ' -> (.+)$') { $p = $Matches[1] }
+        $p = $p.Trim('"')
+        if ($p -imatch '\.(rpwx|sbsx|rpy)$') {
+            if (-not $matched.Contains($p)) { $matched.Add($p) }
+        }
+    }
+    return @($matched.ToArray())
+}
+
 function Invoke-StageAndCommit {
     Step 'Commit'
     if (-not (Git-Out config user.email) -or -not (Git-Out config user.name)) {
@@ -1304,16 +1378,48 @@ function Invoke-StageAndCommit {
         Git-Show diff --cached --stat
     } else {
         Info 'Nothing staged yet. Changes in this component:'
-        Git-Show status -s
-        if (Confirm-Action 'Stage ALL of the above (git add -A)?' 'y' $script:StageAll) {
+        Show-CategorizedChanges
+        $modelFiles = @(Get-RhapsodyModelFiles)
+        if ($script:ModelOnly) {
+            if ($modelFiles.Count -eq 0) {
+                Die $EX_STATE 'No Rhapsody model files (*.rpwx, *.sbsx, *.rpy) found to commit (--model-only).'
+            }
+            Info "Staging $($modelFiles.Count) Rhapsody model file(s) only (--model-only)..."
+            Run-Git (@('add', '--') + $modelFiles)
+            $script:HasStaged = $true
+        } elseif ($script:StageAll) {
             Test-SensitiveFiles
             Run-Git @('add', '-A')
             $script:HasStaged = $true
-        } elseif (-not $script:NonInteractive) {
-            Select-FilesInteractively
-            Test-SensitiveFiles
+        } elseif ($script:NonInteractive) {
+            Die $EX_STATE 'Nothing staged.' @('Stage selectively: git add <files>, or pass --all or --model-only')
         } else {
-            Die $EX_STATE 'Nothing staged.' @('Stage selectively: git add <files>, or pass --all')
+            Write-Host ''
+            Write-Host 'How would you like to stage files for this commit?'
+            Write-Host '  [1] Commit ALL changes (git add -A)'
+            if ($modelFiles.Count -gt 0) {
+                Write-Host "  [2] Commit Rhapsody model files only ($($modelFiles.Count) file(s): *.rpwx, *.sbsx, *.rpy - skips .bak/.tmp/generated)"
+                Write-Host '  [3] Pick specific files from a numbered list'
+            } else {
+                Write-Host '  [2] Pick specific files from a numbered list'
+            }
+            Write-Host '  [q] Cancel'
+            $sc = Read-Value 'Enter choice' '1'
+            if ($sc -match '^[qQ]$') { Die $EX_ABORT 'Cancelled.' }
+            if ($sc -eq '1') {
+                Test-SensitiveFiles
+                Run-Git @('add', '-A')
+                $script:HasStaged = $true
+            } elseif ($sc -eq '2' -and $modelFiles.Count -gt 0) {
+                Info "Staging $($modelFiles.Count) Rhapsody model file(s) only:"
+                foreach ($mf in $modelFiles) { Write-Host "       $mf" }
+                Run-Git (@('add', '--') + $modelFiles)
+                $script:HasStaged = $true
+            } elseif (($sc -eq '3' -and $modelFiles.Count -gt 0) -or ($sc -eq '2' -and $modelFiles.Count -eq 0)) {
+                Select-FilesInteractively
+            } else {
+                Die $EX_USAGE "Invalid choice '$sc'."
+            }
         }
     }
     Test-SensitiveFiles
@@ -1924,8 +2030,73 @@ function Invoke-DiscardFiles {
     Hint 'Changed your mind? Restore with: git stash pop   (or inspect: git stash list)'
 }
 
+function Select-MrModeInteractive {
+    Write-Host ''
+    Write-Host 'How would you like to raise the Merge Request on GitLab?'
+    Write-Host '  [1] GitLab GUI (open MR page in Microsoft Edge so you can review/add notes & click Create)'
+    Write-Host '  [2] Auto-create from CLI (create MR automatically during push with Assignee/Reviewer CDS ID)'
+    Write-Host '  [3] Push only (skip raising MR for now)'
+    $mc = Read-Value 'Enter choice' '1'
+    switch ($mc.ToLowerInvariant()) {
+        { $_ -in @('1', 'gui', 'edge', 'browser') } { $script:MrMode = 'gui'; $script:DoMr = $false }
+        { $_ -in @('2', 'cli', 'auto') } { $script:MrMode = 'cli'; $script:DoMr = $true }
+        { $_ -in @('3', 'none', 'push', 'skip') } { $script:MrMode = 'none'; $script:DoMr = $false }
+        default { Warn "Unrecognised choice; using GitLab GUI (Microsoft Edge)."; $script:MrMode = 'gui'; $script:DoMr = $false }
+    }
+}
+
+function Invoke-Wizard {
+    Step 'Complete Workflow Wizard (Branch -> Commit -> Push -> MR)'
+    # 1. Branch creation (if not already on a Jira branch, or if user wants a new one)
+    $needBranch = $true
+    if (-not $script:Detached -and -not (Test-Protected $script:CurBranch) -and ($script:CurBranch -cmatch $script:BranchRegex) -and -not $script:Desc) {
+        if ($script:NonInteractive) {
+            $needBranch = $false
+            Info "Already on Jira branch '$($script:CurBranch)' - keeping it."
+        } elseif (Confirm-Action "Already on Jira branch '$($script:CurBranch)'. Continue on this branch?" 'y' $true) {
+            $needBranch = $false
+        }
+    }
+    if ($needBranch) {
+        Invoke-Branch
+        $script:CurBranch = $script:BranchName
+        $script:Detached = $false
+    }
+
+    # 2. Commit (if uncommitted changes exist)
+    $pending = Git-Out status --porcelain
+    if ($pending) {
+        Resolve-CommitJira
+        Invoke-StageAndCommit
+    } elseif (Test-UnpushedCommits) {
+        Resolve-CommitJira
+        Info 'Working tree is clean - will proceed with existing unpushed commit(s).'
+    } else {
+        Ok "Branch '$($script:CurBranch)' is ready. Edit your files, then run .\git_flow.bat --wizard again to commit, push & raise MR."
+        return
+    }
+
+    # 3. Push + MR
+    $wantPush = if ($script:DoPush -or $script:DoMr) { $true } else { Confirm-Action "Push '$($script:CurBranch)' to '$($script:Remote)' now?" 'y' $true }
+    if (-not $wantPush) {
+        Ok "Committed locally on '$($script:CurBranch)'. Run .\git_flow.bat --push --mr when ready."
+        return
+    }
+    $script:DoPush = $true
+    if (-not $script:DoMr -and -not $script:NonInteractive) {
+        Select-MrModeInteractive
+    }
+    Confirm-BaseRef
+    Invoke-Push
+    Show-MrHandoff
+    if ($script:DoMr) {
+        if (-not (New-MergeRequest)) { $script:MrFailed = $true }
+    }
+}
+
 function Show-Menu {
     Step 'Choose an action'
+    Write-Host '  [0] Wizard: Full Flow (Branch + Commit + Push + MR in one go)'
     Write-Host "  [1] Start New Branch (fetch --all -> checkout & pull $($script:BaseBranch) -> create Jira branch)"
     Write-Host '  [2] Commit changes (+ Push & Raise GitLab MR)'
     Write-Host '  [3] Push existing commits (+ Raise GitLab MR)'
@@ -1937,6 +2108,7 @@ function Show-Menu {
     Write-Host '  [q] Quit'
     $c = Read-Host 'Enter choice'
     switch ($c) {
+        '0' { $script:DoWizard = $true }
         '1' { $script:DoBranch = $true }
         '2' { $script:DoCommit = $true; if (Confirm-Action "Push to '$($script:Remote)' after committing?" 'y' $true) { $script:DoPush = $true } }
         '3' { $script:DoPush = $true }
@@ -1949,25 +2121,14 @@ function Show-Menu {
         default { Die $EX_USAGE "Invalid choice '$c'." }
     }
     if ($script:DoPush) {
-        Write-Host ''
-        Write-Host 'How would you like to raise the Merge Request on GitLab?'
-        Write-Host '  [1] GitLab GUI (open MR page in Microsoft Edge so you can review/add notes & click Create)'
-        Write-Host '  [2] Auto-create from CLI (create MR automatically during push with Assignee/Reviewer CDS ID)'
-        Write-Host '  [3] Push only (skip raising MR for now)'
-        $mc = Read-Value 'Enter choice' '1'
-        switch ($mc.ToLowerInvariant()) {
-            { $_ -in @('1', 'gui', 'edge', 'browser') } { $script:MrMode = 'gui'; $script:DoMr = $false }
-            { $_ -in @('2', 'cli', 'auto') } { $script:MrMode = 'cli'; $script:DoMr = $true }
-            { $_ -in @('3', 'none', 'push', 'skip') } { $script:MrMode = 'none'; $script:DoMr = $false }
-            default { Warn "Unrecognised choice; using GitLab GUI (Microsoft Edge)."; $script:MrMode = 'gui'; $script:DoMr = $false }
-        }
+        Select-MrModeInteractive
     }
 }
 
 function Reset-InteractiveRunState {
     $script:DoBranch = $false; $script:DoCommit = $false; $script:DoPush = $false
     $script:DoMr = $false; $script:DoMrText = $false; $script:DoSync = $false
-    $script:DoUndo = $false; $script:DoUpdate = $false; $script:DoDiscard = $false
+    $script:DoWizard = $false; $script:DoUndo = $false; $script:DoUpdate = $false; $script:DoDiscard = $false
     $script:Component = ''; $script:JiraId = ''; $script:BranchType = ''; $script:Desc = ''; $script:CommitMsg = ''
     $script:Assignee = ''; $script:Reviewer = ''; $script:MrPeoplePrompted = $false
     $script:RepoDir = ''; $script:MultiRepos = @(); $script:CurBranch = ''; $script:Detached = $false
@@ -1988,6 +2149,13 @@ function Invoke-Main([object[]]$Argv) {
     Write-Line " Git & Jira Flow Assistant  v$($script:VERSION)" 'White'
     Write-Line '=========================================' 'Cyan'
 
+    if ($script:DoHealth) {
+        $all = @(Find-Repos $startDir)
+        if ($all.Count -eq 0) { Die $EX_NOTFOUND "No git repositories found under $startDir." }
+        Show-WorkspaceHealth $startDir $all
+        return 0
+    }
+
     if ($script:DoStatus) {
         $all = @(Find-Repos $startDir)
         if ($all.Count -eq 0) { Die $EX_NOTFOUND "No git repositories found under $startDir." }
@@ -1995,9 +2163,6 @@ function Invoke-Main([object[]]$Argv) {
         return 0
     }
 
-    if ($script:MenuMode -and -not $script:DryRun) {
-        if (Confirm-Action 'Enable Dry Run mode (simulate commands without executing)?' 'n' $false) { $script:DryRun = $true }
-    }
     if ($script:DryRun) { Warn 'DRY RUN: mutating commands are only printed, never executed.' }
 
     while ($true) {
@@ -2032,6 +2197,7 @@ function Invoke-Main([object[]]$Argv) {
                         Invoke-SyncAll $startDir
                     }
                 }
+                elseif ($script:DoWizard) { Invoke-Wizard }
                 elseif ($script:DoUndo) { Invoke-UndoCommit }
                 elseif ($script:DoUpdate) { Invoke-UpdateFromBase }
                 elseif ($script:DoDiscard) { Invoke-DiscardFiles }

@@ -1,4 +1,4 @@
-# AUTOSAR Git + Jira + GitLab Complete Documentation (`git_flow` v2.8)
+# AUTOSAR Git + Jira + GitLab Complete Documentation (`git_flow` v3.0)
 
 This document covers every detail of the `git_flow` workflow assistant: why it exists, where to put it, how to run it, every screen and prompt in sequence, every safety check and edge case, all command-line flags, environment variables, exit codes, and recovery steps.
 
@@ -123,17 +123,12 @@ flowchart TD
 
 ---
 
-### Phase 1: Startup & Dry-Run Mode
+### Phase 1: Startup & Explicit Dry-Run Mode (`--dry-run`)
 
-When you run `.\git_flow.bat` with no flags, the first question is:
-```text
-Enable Dry Run mode (simulate commands without executing)? [y/N]:
-```
-- **Press Enter (`N`):** Normal execution mode.
-- **Type `y` (or pass `--dry-run` / `-n`):** Safe simulation mode.
-  - Read-only checks (`git status`, `git fetch --all`, conflict checks) still run so the preview is 100% accurate.
-  - Every command that would modify your repo (`git checkout`, `git pull`, `git add`, `git commit`, `git push`) is **not executed**—it is only printed in yellow as:
-    `[dry-run] would run: git ...`
+Running `.\git_flow.bat` or `./git_flow.sh` starts immediately in **Normal Mode** (no startup prompt).
+To preview commands without modifying anything, pass `--dry-run` (or `-n`):
+- Read-only checks (`git status`, `git fetch --all`, conflict checks) still run so the preview is 100% accurate.
+- Every command that would modify your repo (`git checkout`, `git pull`, `git add`, `git commit`, `git push`) is **not executed**—it is only printed in yellow as `[dry-run] would run: git ...`.
 
 ---
 
@@ -156,7 +151,28 @@ Next, the script scans your Main Repo and all nested subfolders (up to depth 10,
 - **`*` (Yellow row):** This repository has **uncommitted modified, staged, or untracked files**. Up to 6 changed file paths are listed directly underneath (`M` = modified, `A` = staged, `??` = untracked) so you can see all changes across your entire AUTOSAR project from the Main Repo.
 - **`^` (Cyan row):** This repository's working tree is clean, but it is on a task branch with **local commits that have not been pushed to GitLab yet** (`1 unpushed commit(s) ready to push`).
 - **Blank marker (Green/Gray row):** Working tree is clean with nothing unpushed.
-- **`[DETACHED@371a656]`:** The component is currently in **Detached HEAD** state at commit `371a656` (common in AUTOSAR checkouts before local `develop` is checked out).
+- **`[DETACHED@371a656 (manifest-managed)]`:** The component is in **Detached HEAD** state at commit `371a656` (normal for `.repo` manifest-managed components like `rte`, `ucl-gen`, `mcal-gen` when not actively being edited).
+
+#### Compact Workspace Health Summary (`--health` or typing `h`):
+In large 45+ repo workspaces, run `.\git_flow.bat --health` (or `./git_flow.sh --health`, or type **`h`** at the repository selection prompt) for a concise summary instead of scanning 45 rows:
+```text
+==> Workspace Health
+Repositories: 45
+
+Changed:
+  osk-arch-design-model (2 file(s))
+  bl-app (1 file(s))
+
+Ahead of remote:
+  none
+
+Detached (manifest-managed):
+  39 repos
+
+On develop:
+  bsw-gen
+  swc-gen
+```
 
 #### What you can type at `Select repository`:
 - **A number (`1`–`4`):** Selects that repository.
@@ -322,24 +338,22 @@ What if you forgot to create a branch first, and edited files (or even made comm
   - `PROJ-123 - handle empty frame` -> **`PROJ-123: handle empty frame`**
 - **Blocks empty descriptions:** If someone only types `PROJ-123` with no description, it rejects it (`Commit message cannot be just the Jira ID - please add a description of what changed`) and asks again.
 
-#### Step 6.4: Staging Files (All Files OR Interactive File Picker)
+#### Step 6.4: Staging Files (All Files, Rhapsody Model Files Only, OR Interactive File Picker)
 - **Case A (You already staged specific files with `git add` before running the script):**
   - Shows `git diff --cached --stat` and commits **only** your staged changes, leaving unstaged files alone.
 - **Case B (Nothing is staged yet):**
-  - Shows all modified and untracked files (`git status -s`) and asks:
-    `Stage ALL of the above (git add -A)? [Y/n]:`
-  - **If you press Enter (`Y`):** Stages everything (`git add -A`).
-  - **If you type `n` (Interactive Selective File Picker):**
-    Instead of exiting, it displays a numbered list of every modified/untracked file:
+  - Displays the grouped **Rhapsody / AUTOSAR / Deleted / Source** change summary and asks:
     ```text
-    [..] Select specific files to stage for this commit:
-      [1] src/dcm_core.c
-      [2] include/dcm_core.h
-      [3] cfg/generated_temp.arxml
-      [4] build.log
-    Enter file numbers separated by space/comma (e.g. 1 3, 'a' = all, 'q' = quit): 1 2
+    How would you like to stage files for this commit?
+      [1] Commit ALL changes (git add -A)
+      [2] Commit Rhapsody model files only (2 file(s): *.rpwx, *.sbsx, *.rpy - skips .bak/.tmp/generated)
+      [3] Pick specific files from a numbered list
+      [q] Cancel
+    Enter choice [1]:
     ```
-    Typing `1 2` runs `git add -- src/dcm_core.c include/dcm_core.h`, leaving `generated_temp.arxml` and `build.log` out of the commit!
+  - **Option `[1]` (`--all`):** Stages everything (`git add -A`).
+  - **Option `[2]` (`--model-only`):** Stages **only Rhapsody model files** (`*.rpwx`, `*.sbsx`, `*.rpy` — including deletions) and automatically skips `.bak`, `.tmp`, logs, and generated build artifacts!
+  - **Option `[3]` (Interactive Selective File Picker):** Shows a numbered list of every modified/untracked file so you can type `1 2` to commit only specific files.
 
 #### Step 6.5: Secret Scanner & Safe Commit
 - Scans candidate files for accidental secrets/keys (`.env`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`, `id_rsa`, `id_ed25519`). Warns and blocks if found.
@@ -447,6 +461,8 @@ Both `git_flow.ps1` / `git_flow.bat` and `git_flow.sh` accept identical flags (P
 
 | Flag | Shorthand | Description |
 |---|---|---|
+| `--wizard` | | Complete end-to-end daily workflow in one command: **Branch + Commit + Push + MR** (also `[0]` in menu) |
+| `--health` | | Compact workspace health summary for large multi-repo workspaces (Changed, Ahead, Detached, On `develop`) |
 | `--status` | | Scan Main Repo + all nested components and show branches, changed files (`*`), and unpushed commits (`^`) |
 | `--sync` | | Run `git fetch --all --prune`, checkout `develop`, and `git pull --ff-only` across all workspace repos (or single repo if `-c` is given) |
 | `--branch` | | Fetch, sync `develop`, and create a new Jira branch (implied if `-j` / `-d` / `-t` are passed without `--commit`/`--push`) |
@@ -468,6 +484,7 @@ Both `git_flow.ps1` / `git_flow.bat` and `git_flow.sh` accept identical flags (P
 | `--assignee <cdsid>` | `-a <cdsid>` | GitLab Assignee CDS ID (e.g. `jfernan1`) |
 | `--reviewer <cdsid>` | | GitLab Reviewer CDS ID(s) (e.g. `rkumar2` or `"rkumar2,asmith3"`) |
 | `--all` | | Automatically stage all modified and untracked files (`git add -A`) when committing |
+| `--model-only` | | Stage only Rhapsody model files (`*.rpwx`, `*.sbsx`, `*.rpy`), skipping `.bak`/`.tmp`/generated files |
 | `--carry` | | Carry uncommitted changes directly onto the new branch without stashing (ideal for Rhapsody `.rpwx`/`.sbsx` edits) |
 | `--stash` | | Automatically stash uncommitted tracked changes before creating a new branch |
 | `--dry-run` | `-n` | Simulate and print every mutating Git command without executing it |

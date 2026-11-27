@@ -31,7 +31,7 @@ fi
 
 set -Eeuo pipefail
 
-readonly VERSION="2.8.0"
+readonly VERSION="3.0.0"
 readonly EX_USAGE=2 EX_NOTFOUND=3 EX_STATE=4 EX_NETWORK=5 EX_PROTECTED=6 EX_GIT=7 EX_MR=8 EX_ABORT=130
 
 # ------------------------------------------------------------ configuration ---
@@ -53,9 +53,9 @@ ORIG_DIR="$PWD"
 WORKSPACE_ROOT="$PWD"
 SELF="$0"
 DRY_RUN=false; YES=false; NONINTERACTIVE=false; USE_COLOR=true
-NO_FETCH=false; FORCE=false; STAGE_ALL=false; AUTO_STASH=false; CARRY_CHANGES=false; CARRY_FLAG=false; JIRA_FROM_BRANCH=false; DRAFT=false
+NO_FETCH=false; FORCE=false; STAGE_ALL=false; MODEL_ONLY=false; AUTO_STASH=false; CARRY_CHANGES=false; CARRY_FLAG=false; JIRA_FROM_BRANCH=false; DRAFT=false
 DO_BRANCH=false; DO_COMMIT=false; DO_PUSH=false; DO_MR=false; DO_MRTEXT=false
-DO_SYNC=false; DO_STATUS=false; DO_UNDO=false; DO_UPDATE=false; DO_DISCARD=false
+DO_SYNC=false; DO_STATUS=false; DO_HEALTH=false; DO_WIZARD=false; DO_UNDO=false; DO_UPDATE=false; DO_DISCARD=false
 COMPONENT=""; JIRA_ID=""; LAST_JIRA_ID=""; BRANCH_TYPE=""; DESC=""; COMMIT_MSG=""
 ASSIGNEE="${GIT_FLOW_ASSIGNEE:-}"; REVIEWER="${GIT_FLOW_REVIEWER:-}"
 LAST_ASSIGNEE="$ASSIGNEE"; LAST_REVIEWER="$REVIEWER"; MR_PEOPLE_PROMPTED=false
@@ -203,6 +203,8 @@ USAGE
   ./git_flow.sh [options]        (no action flag => workspace dashboard + interactive menu)
 
 ACTIONS
+  --wizard               One-command full workflow: Branch + Commit + Push + MR
+  --health               Compact workspace health summary (changed, ahead, detached, on develop)
   --status               Show branch, modified files & unpushed commits across all workspace repos
   --sync                 Run fetch --all + checkout develop + pull across all workspace repos
   --branch               Fetch, update develop, and create branch for Jira task (supports -c can,dcm)
@@ -232,6 +234,7 @@ BEHAVIOUR
       --carry       Carry uncommitted changes onto the new branch (without stashing)
       --stash       Auto-stash tracked changes before creating a branch
       --all         Stage everything when nothing is staged (git add -A)
+      --model-only  Stage only Rhapsody model files (*.rpwx, *.sbsx, *.rpy), skipping .bak/.tmp/generated
       --draft       Create the MR/PR as draft
       --no-fetch    Skip 'git fetch' (offline work; push will still need network)
       --force       Bypass branch-name / Jira-mismatch / sensitive-file checks
@@ -283,11 +286,14 @@ parse_args() {
       --mr-text)       DO_MRTEXT=true ;;
       --sync)          DO_SYNC=true ;;
       --status)        DO_STATUS=true ;;
+      --health)        DO_HEALTH=true ;;
+      --wizard)        DO_WIZARD=true ;;
       --undo|--undo-commit) DO_UNDO=true ;;
       --update)        DO_UPDATE=true ;;
       --discard)       DO_DISCARD=true ;;
       --draft)         DRAFT=true ;;
       --all)           STAGE_ALL=true ;;
+      --model-only)    MODEL_ONLY=true ;;
       --carry)         CARRY_FLAG=true ;;
       --jira-from-branch) JIRA_FROM_BRANCH=true ;;
       --stash)         AUTO_STASH=true ;;
@@ -312,20 +318,19 @@ parse_args() {
 
 MENU_MODE=false
 determine_mode() {
-  if $DO_MR; then DO_PUSH=true; fi
-  if ! $DO_BRANCH && ! $DO_COMMIT && ! $DO_PUSH && ! $DO_MRTEXT && ! $DO_SYNC && ! $DO_STATUS && ! $DO_UNDO && ! $DO_UPDATE && ! $DO_DISCARD; then
-    if [[ -n "$JIRA_ID$DESC$BRANCH_TYPE" ]]; then
+  if $DO_MR && ! $DO_WIZARD; then DO_PUSH=true; fi
+  if ! $DO_BRANCH && ! $DO_COMMIT && ! $DO_PUSH && ! $DO_MRTEXT && ! $DO_SYNC && ! $DO_STATUS && ! $DO_HEALTH && ! $DO_WIZARD && ! $DO_UNDO && ! $DO_UPDATE && ! $DO_DISCARD; then
+    if [[ -n "$JIRA_ID$DESC$BRANCH_TYPE" ]] || $JIRA_FROM_BRANCH; then
       DO_BRANCH=true
     elif $NONINTERACTIVE; then
       die "$EX_USAGE" "No action given and no terminal available for the menu." \
-        "Use one of: --status | --sync | --branch | --commit \"msg\" | --push | --mr-text | --undo-commit | --update | --discard" "See: $SELF --help"
+        "Use one of: --wizard | --health | --status | --sync | --branch | --commit \"msg\" | --push | --mr-text | --undo-commit | --update | --discard" "See: $SELF --help"
     else
       MENU_MODE=true
     fi
   fi
-  if $DO_BRANCH && { $DO_COMMIT || $DO_PUSH || $DO_MRTEXT || $DO_SYNC || $DO_STATUS || $DO_UNDO || $DO_UPDATE || $DO_DISCARD; }; then
-    die "$EX_USAGE" "--branch cannot be combined with --commit/--push/--mr/--sync/--status/--undo-commit/--update/--discard." \
-      "Run it twice: first --branch, then --commit ... --push"
+  if $DO_BRANCH && { $DO_COMMIT || $DO_PUSH || $DO_MRTEXT || $DO_SYNC || $DO_STATUS || $DO_HEALTH || $DO_WIZARD || $DO_UNDO || $DO_UPDATE || $DO_DISCARD; }; then
+    die "$EX_USAGE" "--branch cannot be combined with other action flags (use --wizard for branch + commit + push in one go)."
   fi
   if $DO_MRTEXT && { $DO_COMMIT || $DO_PUSH; }; then
     die "$EX_USAGE" "--mr-text cannot be combined with --commit/--push/--mr."
@@ -372,7 +377,7 @@ show_workspace_dashboard() {
     unpushed=0
     if [[ -z "$br" ]]; then
       sha=$(git -C "$r" rev-parse --short HEAD 2>/dev/null || true)
-      br="DETACHED@${sha:-NONE}"
+      br="DETACHED@${sha:-NONE} (manifest-managed)"
     elif ! is_protected "$br"; then
       unpushed=$(git -C "$r" rev-list --count "@{u}..HEAD" -- 2>/dev/null || git -C "$r" rev-list --count "$DEFAULT_REMOTE/$BASE_BRANCH..HEAD" -- 2>/dev/null || echo 0)
     fi
@@ -381,7 +386,7 @@ show_workspace_dashboard() {
       cnt=$(printf '%s\n' "$porcelain" | wc -l | tr -d ' ')
       local up_str=""
       if [[ "$unpushed" -gt 0 ]]; then up_str=", $unpushed unpushed commit(s)"; fi
-      printf '%s  [%2d] * %-28s [%-26s] -> %s changed file(s)%s%s\n' "$C_YELLOW" "$i" "$label" "$br" "$cnt" "$up_str" "$C_RESET"
+      printf '%s  [%2d] * %-28s [%-35s] -> %s changed file(s)%s%s\n' "$C_YELLOW" "$i" "$label" "$br" "$cnt" "$up_str" "$C_RESET"
       printf '%s\n' "$porcelain" | head -n 6 | while IFS= read -r line; do
         printf '            %s%s%s\n' "$C_DIM" "$line" "$C_RESET"
       done
@@ -389,12 +394,63 @@ show_workspace_dashboard() {
         printf '            %s... and %d more%s\n' "$C_DIM" "$((cnt - 6))" "$C_RESET"
       fi
     elif [[ "$unpushed" -gt 0 ]]; then
-      printf '%s  [%2d] ^ %-28s [%-26s] -> clean (%d unpushed commit(s) ready to push)%s\n' "$C_CYAN" "$i" "$label" "$br" "$unpushed" "$C_RESET"
+      printf '%s  [%2d] ^ %-28s [%-35s] -> clean (%d unpushed commit(s) ready to push)%s\n' "$C_CYAN" "$i" "$label" "$br" "$unpushed" "$C_RESET"
     else
-      printf '%s  [%2d]   %-28s [%-26s] -> clean%s\n' "$C_GREEN" "$i" "$label" "$br" "$C_RESET"
+      printf '%s  [%2d]   %-28s [%-35s] -> clean%s\n' "$C_GREEN" "$i" "$label" "$br" "$C_RESET"
     fi
     i=$((i + 1))
   done
+}
+
+show_workspace_health() {
+  local root="$1"
+  shift
+  local -a repos=("$@") changed=() ahead=() on_base=() on_work=()
+  local detached_cnt=0 r label br porcelain cnt unpushed=0
+  step "Workspace Health"
+  printf 'Repositories: %d\n' "${#repos[@]}"
+  for r in "${repos[@]}"; do
+    label=$(repo_rel_label "$root" "$r")
+    br=$(git -C "$r" symbolic-ref --short -q HEAD 2>/dev/null || true)
+    unpushed=0
+    if [[ -z "$br" ]]; then
+      detached_cnt=$((detached_cnt + 1))
+    else
+      if [[ "$br" == "$BASE_BRANCH" ]]; then
+        on_base+=("$label")
+      else
+        on_work+=("$label [$br]")
+      fi
+      if ! is_protected "$br"; then
+        unpushed=$(git -C "$r" rev-list --count "@{u}..HEAD" -- 2>/dev/null || git -C "$r" rev-list --count "$DEFAULT_REMOTE/$BASE_BRANCH..HEAD" -- 2>/dev/null || echo 0)
+      fi
+    fi
+    porcelain=$(git -C "$r" status --porcelain 2>/dev/null || true)
+    if [[ -n "$porcelain" ]]; then
+      cnt=$(printf '%s\n' "$porcelain" | wc -l | tr -d ' ')
+      changed+=("$label ($cnt file(s))")
+    fi
+    if [[ "$unpushed" -gt 0 ]]; then
+      ahead+=("$label ($unpushed commit(s))")
+    fi
+  done
+
+  printf '\n%sChanged:%s\n' "$C_YELLOW" "$C_RESET"
+  if [[ ${#changed[@]} -gt 0 ]]; then for r in "${changed[@]}"; do printf '  %s\n' "$r"; done; else printf '  none\n'; fi
+
+  printf '\n%sAhead of remote:%s\n' "$C_CYAN" "$C_RESET"
+  if [[ ${#ahead[@]} -gt 0 ]]; then for r in "${ahead[@]}"; do printf '  %s\n' "$r"; done; else printf '  none\n'; fi
+
+  printf '\n%sDetached (manifest-managed):%s\n' "$C_DIM" "$C_RESET"
+  printf '  %d repos\n' "$detached_cnt"
+
+  printf '\n%sOn %s:%s\n' "$C_GREEN" "$BASE_BRANCH" "$C_RESET"
+  if [[ ${#on_base[@]} -gt 0 ]]; then for r in "${on_base[@]}"; do printf '  %s\n' "$r"; done; else printf '  none\n'; fi
+
+  if [[ ${#on_work[@]} -gt 0 ]]; then
+    printf '\n%sOn task / feature branches:%s\n' "$C_BOLD" "$C_RESET"
+    for r in "${on_work[@]}"; do printf '  %s\n' "$r"; done
+  fi
 }
 
 match_repos() {
@@ -513,13 +569,14 @@ resolve_repo() {
       "Pass -c <component-name> (or run interactively to pick from the list)"
   fi
 
-  printf '\n%s\n' "${C_CYAN}Tip: Type a number (1-${#all[@]}), multiple numbers/names to branch several components at once (e.g. '2 3' or 'can,dcm'), or 's' to Sync ALL repos.${C_RESET}"
+  printf '\n%s\n' "${C_CYAN}Tip: Type a number (1-${#all[@]}), '2 3' for multi-component branching, 'h' for compact health summary, or 's' to Sync ALL repos.${C_RESET}"
   local sel
   while true; do
-    read -r -p "Select repository (1-${#all[@]}, e.g. '2 3', name, 's' = sync all, 'q' = quit): " sel || die "$EX_ABORT" "Input closed - aborting."
+    read -r -p "Select repository (1-${#all[@]}, e.g. '2 3', name, 'h' = health, 's' = sync all, 'q' = quit): " sel || die "$EX_ABORT" "Input closed - aborting."
     sel=$(trim "$sel")
     if [[ -z "$sel" ]]; then continue; fi
     if [[ "$sel" == [qQ] ]]; then die "$EX_ABORT" "Cancelled."; fi
+    if [[ "$sel" == [hH] ]]; then show_workspace_health "$PWD" "${all[@]}"; printf '\n'; continue; fi
     if [[ "$sel" == [sS0] ]]; then
       DO_SYNC=true
       REPO_DIR="${all[0]}"
@@ -746,7 +803,7 @@ show_categorized_changes() {
 show_status() {
   step "Repository status"
   info "Repo   : $REPO_DIR"
-  if $DETACHED; then warn "HEAD   : DETACHED at $(git rev-parse --short HEAD)"; else info "Branch : $CUR_BRANCH"; fi
+  if $DETACHED; then info "HEAD   : DETACHED at $(git rev-parse --short HEAD) (manifest-managed)"; else info "Branch : $CUR_BRANCH"; fi
   show_categorized_changes
 }
 
@@ -1125,7 +1182,16 @@ do_branch() {
 
 # --------------------------------------------- rescue / protected handling ----
 rescue_to_branch() {
-  local reason="$1" pending ahead=0
+  local reason="$1" pending ahead=0 where rec_jira
+  where="${CUR_BRANCH:-DETACHED HEAD}"
+  detect_jira_id || true
+  rec_jira="${JIRA_ID:-${DETECTED_JIRA:-${LAST_JIRA_ID:-OSKDC33837-14809}}}"
+  printf '\n%s\n' "${C_RED}================================================================${C_RESET}" >&2
+  printf '%s\n'   "${C_RED}  WARNING: Protected Branch / Detached HEAD Detected!${C_RESET}" >&2
+  printf '%s\n'   "${C_YELLOW}  You are currently on:   $where${C_RESET}" >&2
+  printf '%s\n'   "${C_YELLOW}  Creating a commit directly on '$where' is NOT RECOMMENDED / BLOCKED.${C_RESET}" >&2
+  printf '%s\n'   "${C_CYAN}  Recommended branch:     ${rec_jira}-short-description${C_RESET}" >&2
+  printf '%s\n'   "${C_RED}================================================================${C_RESET}" >&2
   warn "$reason"
   pending=$(git status --porcelain)
   if ! $DETACHED && git show-ref --verify --quiet "refs/remotes/$REMOTE/$CUR_BRANCH"; then
@@ -1133,15 +1199,15 @@ rescue_to_branch() {
   fi
   if [[ -z "$pending" && "$ahead" -eq 0 && "$DETACHED" == false ]]; then
     die "$EX_PROTECTED" "You are on protected branch '$CUR_BRANCH' with nothing to move." \
-      "Start new work with:  $SELF --branch --jira PROJ-123 --desc \"short description\""
+      "Start new work with:  $SELF --branch --jira $rec_jira --desc \"short description\""
   fi
   if $NONINTERACTIVE && { [[ -z "$JIRA_ID" ]] || [[ -z "$DESC" ]]; }; then
-    die "$EX_PROTECTED" "Refusing to commit/push on '${CUR_BRANCH:-detached HEAD}'." \
-      "Re-run with --jira PROJ-123 --desc \"title\" (and optional --type) to move your work to a new branch automatically" \
-      "Or create it yourself: git checkout -b PROJ-123-short-desc"
+    die "$EX_PROTECTED" "Refusing to commit/push on '$where'." \
+      "Re-run with --jira $rec_jira --desc \"title\" (and optional --type) to move your work to a new branch automatically" \
+      "Or create it yourself: git checkout -b ${rec_jira}-short-desc"
   fi
-  if ! confirm "Move your current work (uncommitted changes + $ahead local commit(s)) onto a new properly named branch?" y y; then
-    die "$EX_PROTECTED" "Aborted - nothing was changed." "Create a branch first: git checkout -b PROJ-123-short-desc"
+  if ! confirm "Create a new Jira branch and move your current work (uncommitted changes + $ahead local commit(s)) onto it now?" y y; then
+    die "$EX_PROTECTED" "Aborted - nothing was changed." "Create a branch first: git checkout -b ${rec_jira}-short-desc"
   fi
   collect_branch_inputs
   if check_branch_free; then
@@ -1189,10 +1255,7 @@ resolve_commit_jira() {
     fi
   elif [[ -n "$from_branch" ]]; then
     JIRA_ID="$from_branch"
-    if ! $NONINTERACTIVE; then
-      prompt "Jira Task ID" "$JIRA_ID" || true
-      JIRA_ID=$(upper "$REPLY_VAL")
-    fi
+    info "Jira ID auto-detected from branch: $JIRA_ID"
   else
     if ! prompt "Jira Task ID (e.g. PROJ-123)" "$LAST_JIRA_ID"; then
       die "$EX_USAGE" "Cannot infer a Jira ID from branch '$CUR_BRANCH'." "Pass --jira PROJ-123"
@@ -1311,6 +1374,22 @@ select_files_interactively() {
   done
 }
 
+RHAPSODY_MODEL_FILES=()
+collect_rhapsody_model_files() {
+  RHAPSODY_MODEL_FILES=()
+  local ln p p_low
+  while IFS= read -r ln; do
+    if [[ ${#ln} -lt 4 ]]; then continue; fi
+    p="${ln:3}"
+    if [[ "$p" == *" -> "* ]]; then p="${p##* -> }"; fi
+    p="${p#\"}"; p="${p%\"}"
+    p_low=$(lower "$p")
+    if [[ "$p_low" =~ \.(rpwx|sbsx|rpy)$ ]]; then
+      RHAPSODY_MODEL_FILES+=("$p")
+    fi
+  done < <(git -c core.quotepath=off status --porcelain 2>/dev/null || true)
+}
+
 stage_and_commit() {
   step "Commit"
   if [[ -z "$(git config user.email 2>/dev/null || true)" || -z "$(git config user.name 2>/dev/null || true)" ]]; then
@@ -1335,16 +1414,49 @@ stage_and_commit() {
     git diff --cached --stat
   else
     info "Nothing staged yet. Changes in this component:"
-    git status -s
-    if confirm "Stage ALL of the above (git add -A)?" y "$(yn "$STAGE_ALL")"; then
+    show_categorized_changes
+    collect_rhapsody_model_files
+    if $MODEL_ONLY; then
+      if [[ ${#RHAPSODY_MODEL_FILES[@]} -eq 0 ]]; then
+        die "$EX_STATE" "No Rhapsody model files (*.rpwx, *.sbsx, *.rpy) found to commit (--model-only)."
+      fi
+      info "Staging ${#RHAPSODY_MODEL_FILES[@]} Rhapsody model file(s) only (--model-only)..."
+      run git add -- "${RHAPSODY_MODEL_FILES[@]}"
+      HAS_STAGED=true
+    elif $STAGE_ALL; then
       check_sensitive_files
       run git add -A
       HAS_STAGED=true
-    elif ! $NONINTERACTIVE; then
-      select_files_interactively
-      check_sensitive_files
+    elif $NONINTERACTIVE; then
+      die "$EX_STATE" "Nothing staged." "Stage selectively: git add <files>, or pass --all or --model-only"
     else
-      die "$EX_STATE" "Nothing staged." "Stage selectively: git add <files>, or pass --all"
+      printf '\n%s\n' "How would you like to stage files for this commit?" "  [1] Commit ALL changes (git add -A)"
+      if [[ ${#RHAPSODY_MODEL_FILES[@]} -gt 0 ]]; then
+        printf '%s\n' \
+          "  [2] Commit Rhapsody model files only (${#RHAPSODY_MODEL_FILES[@]} file(s): *.rpwx, *.sbsx, *.rpy - skips .bak/.tmp/generated)" \
+          "  [3] Pick specific files from a numbered list"
+      else
+        printf '%s\n' "  [2] Pick specific files from a numbered list"
+      fi
+      printf '%s\n' "  [q] Cancel"
+      prompt "Enter choice" "1" || true
+      local sc="$REPLY_VAL"
+      if [[ "$sc" == [qQ] ]]; then die "$EX_ABORT" "Cancelled."; fi
+      if [[ "$sc" == "1" ]]; then
+        check_sensitive_files
+        run git add -A
+        HAS_STAGED=true
+      elif [[ "$sc" == "2" && ${#RHAPSODY_MODEL_FILES[@]} -gt 0 ]]; then
+        info "Staging ${#RHAPSODY_MODEL_FILES[@]} Rhapsody model file(s) only:"
+        local mf
+        for mf in "${RHAPSODY_MODEL_FILES[@]}"; do printf '       %s\n' "$mf"; done
+        run git add -- "${RHAPSODY_MODEL_FILES[@]}"
+        HAS_STAGED=true
+      elif [[ ( "$sc" == "3" && ${#RHAPSODY_MODEL_FILES[@]} -gt 0 ) || ( "$sc" == "2" && ${#RHAPSODY_MODEL_FILES[@]} -eq 0 ) ]]; then
+        select_files_interactively
+      else
+        die "$EX_USAGE" "Invalid choice '$sc'."
+      fi
     fi
   fi
   check_sensitive_files
@@ -1999,9 +2111,77 @@ do_discard_files() {
   hint "Changed your mind? Restore with: git stash pop   (or inspect: git stash list)"
 }
 
+select_mr_mode_interactive() {
+  printf '\n%s\n' \
+    "How would you like to raise the Merge Request on GitLab?" \
+    "  [1] GitLab GUI (open MR page in Microsoft Edge so you can review/add notes & click Create)" \
+    "  [2] Auto-create from CLI (create MR automatically during push with Assignee/Reviewer CDS ID)" \
+    "  [3] Push only (skip raising MR for now)"
+  prompt "Enter choice" "1" || true
+  case "$(lower "$REPLY_VAL")" in
+    1|gui|edge|browser) MR_MODE="gui"; DO_MR=false ;;
+    2|cli|auto) MR_MODE="cli"; DO_MR=true ;;
+    3|none|push|skip) MR_MODE="none"; DO_MR=false ;;
+    *) warn "Unrecognised choice; using GitLab GUI (Microsoft Edge)."; MR_MODE="gui"; DO_MR=false ;;
+  esac
+}
+
+do_wizard() {
+  step "Complete Workflow Wizard (Branch -> Commit -> Push -> MR)"
+  local need_branch=true
+  if ! $DETACHED && ! is_protected "$CUR_BRANCH" && [[ "$CUR_BRANCH" =~ $BRANCH_REGEX ]] && [[ -z "$DESC" ]]; then
+    if $NONINTERACTIVE; then
+      need_branch=false
+      info "Already on Jira branch '$CUR_BRANCH' - keeping it."
+    elif confirm "Already on Jira branch '$CUR_BRANCH'. Continue on this branch?" y y; then
+      need_branch=false
+    fi
+  fi
+  if $need_branch; then
+    do_branch
+    CUR_BRANCH="$BRANCH_NAME"
+    DETACHED=false
+  fi
+
+  local pending
+  pending=$(git status --porcelain 2>/dev/null || true)
+  if [[ -n "$pending" ]]; then
+    resolve_commit_jira
+    stage_and_commit
+  elif has_unpushed_commits; then
+    resolve_commit_jira
+    info "Working tree is clean - will proceed with existing unpushed commit(s)."
+  else
+    ok "Branch '$CUR_BRANCH' is ready. Edit your files, then run $SELF --wizard again to commit, push & raise MR."
+    return 0
+  fi
+
+  local want_push=false
+  if $DO_PUSH || $DO_MR; then
+    want_push=true
+  elif confirm "Push '$CUR_BRANCH' to '$REMOTE' now?" y y; then
+    want_push=true
+  fi
+  if ! $want_push; then
+    ok "Committed locally on '$CUR_BRANCH'. Run $SELF --push --mr when ready."
+    return 0
+  fi
+  DO_PUSH=true
+  if ! $DO_MR && ! $NONINTERACTIVE; then
+    select_mr_mode_interactive
+  fi
+  ensure_base_ref
+  push_branch
+  mr_handoff
+  if $DO_MR; then
+    if ! create_mr; then MR_FAILED=true; fi
+  fi
+}
+
 interactive_menu() {
   step "Choose an action"
   printf '%s\n' \
+    "  [0] Wizard: Full Flow (Branch + Commit + Push + MR in one go)" \
     "  [1] Start New Branch (fetch --all -> checkout & pull $BASE_BRANCH -> create Jira branch)" \
     "  [2] Commit changes (+ Push & Raise GitLab MR)" \
     "  [3] Push existing commits (+ Raise GitLab MR)" \
@@ -2014,6 +2194,7 @@ interactive_menu() {
   local c
   read -r -p "Enter choice: " c || die "$EX_ABORT" "Input closed - aborting."
   case "$c" in
+    0) DO_WIZARD=true ;;
     1) DO_BRANCH=true ;;
     2) DO_COMMIT=true
        if confirm "Push to '$REMOTE' after committing?" y y; then DO_PUSH=true; fi ;;
@@ -2027,23 +2208,12 @@ interactive_menu() {
     *) die "$EX_USAGE" "Invalid choice '$c'." ;;
   esac
   if $DO_PUSH; then
-    printf '\n%s\n' \
-      "How would you like to raise the Merge Request on GitLab?" \
-      "  [1] GitLab GUI (open MR page in Microsoft Edge so you can review/add notes & click Create)" \
-      "  [2] Auto-create from CLI (create MR automatically during push with Assignee/Reviewer CDS ID)" \
-      "  [3] Push only (skip raising MR for now)"
-    prompt "Enter choice" "1" || true
-    case "$(lower "$REPLY_VAL")" in
-      1|gui|edge|browser) MR_MODE="gui"; DO_MR=false ;;
-      2|cli|auto) MR_MODE="cli"; DO_MR=true ;;
-      3|none|push|skip) MR_MODE="none"; DO_MR=false ;;
-      *) warn "Unrecognised choice; using GitLab GUI (Microsoft Edge)."; MR_MODE="gui"; DO_MR=false ;;
-    esac
+    select_mr_mode_interactive
   fi
 }
 
 reset_interactive_run_state() {
-  DO_BRANCH=false; DO_COMMIT=false; DO_PUSH=false; DO_MR=false; DO_MRTEXT=false; DO_SYNC=false; DO_UNDO=false; DO_UPDATE=false; DO_DISCARD=false
+  DO_BRANCH=false; DO_COMMIT=false; DO_PUSH=false; DO_MR=false; DO_MRTEXT=false; DO_SYNC=false; DO_WIZARD=false; DO_UNDO=false; DO_UPDATE=false; DO_DISCARD=false
   COMPONENT=""; JIRA_ID=""; BRANCH_TYPE=""; DESC=""; COMMIT_MSG=""
   ASSIGNEE=""; REVIEWER=""; MR_PEOPLE_PROMPTED=false
   REPO_DIR=""; MULTI_REPOS=(); CUR_BRANCH=""; DETACHED=false
@@ -2067,6 +2237,17 @@ main() {
   printf '%s\n' "${C_BOLD} Git & Jira Flow Assistant  v$VERSION${C_RESET}"
   printf '%s\n' "${C_CYAN}=========================================${C_RESET}"
 
+  if $DO_HEALTH; then
+    local -a all=()
+    local d
+    while IFS= read -r d; do
+      if [[ -n "$d" ]]; then all+=("$d"); fi
+    done < <(find_repos "$start_dir")
+    if [[ ${#all[@]} -eq 0 ]]; then die "$EX_NOTFOUND" "No git repositories found under $start_dir."; fi
+    show_workspace_health "$start_dir" "${all[@]}"
+    return 0
+  fi
+
   if $DO_STATUS; then
     local -a all=()
     local d
@@ -2078,9 +2259,6 @@ main() {
     return 0
   fi
 
-  if $MENU_MODE && ! $DRY_RUN; then
-    if confirm "Enable Dry Run mode (simulate commands without executing)?" n n; then DRY_RUN=true; fi
-  fi
   if $DRY_RUN; then warn "DRY RUN: mutating commands are only printed, never executed."; fi
 
   while true; do
@@ -2113,6 +2291,8 @@ main() {
           else
             do_sync_all "$start_dir"
           fi
+        elif $DO_WIZARD; then
+          do_wizard
         elif $DO_UNDO; then
           do_undo_commit
         elif $DO_UPDATE; then
